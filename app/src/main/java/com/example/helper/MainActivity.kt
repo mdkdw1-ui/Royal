@@ -3,6 +3,7 @@ package com.example.helper
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.media.projection.MediaProjectionManager // 💡 [해결] 누락되었던 핵심 임포트 추가
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
