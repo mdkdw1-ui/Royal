@@ -291,7 +291,7 @@ class OverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         backgroundHandler?.removeCallbacks(analyzeRunnable)
-        backgroundThread?.quitSafety() // 백그라운드 스레드 안전하게 파괴
+        backgroundThread?.quitSafely() // 백그라운드 스레드 안전하게 파괴
         virtualDisplay?.release()
         imageReader?.close()
         mediaProjection?.stop()
