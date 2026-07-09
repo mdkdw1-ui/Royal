@@ -75,7 +75,6 @@ class MainActivity : AppCompatActivity() {
                         } else {
                             startService(serviceIntent)
                         }
-                        // 💡 [주의] 여기서 finish나 moveTaskToBack을 절대 하지 않고 가만히 대기합니다.
                     } catch (e: Exception) {
                         Log.e(TAG, "서비스 시작 실패", e)
                         Toast.makeText(this, "서비스 시작 실패: ${e.message}", Toast.LENGTH_SHORT).show()
@@ -87,11 +86,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // 💡 서비스에서 캡처 장치 주입을 완벽하게 끝내면 이쪽으로 신호가 와서 그때 안전하게 앱을 종료합니다.
+    // 💡 서비스에서 가상 디스플레이 생성을 100% 완료하면 이 신호를 받습니다.
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         if (intent?.getBooleanExtra("ACTION_FINISH", false) == true) {
-            Log.d(TAG, "서비스 결속 성공 신호 수신. 액티비티를 종료합니다.")
+            Log.d(TAG, "서비스 연결 성공 신호 수신. 홈 화면으로 안전하게 내립니다.")
+            
+            // 💡 [핵심] 현재 앱 태스크 전체를 홈 버튼 누른 것처럼 시스템 백그라운드로 깨끗하게 내립니다.
+            moveTaskToBack(true) 
+            
+            // 그 뒤 액티비티를 안전하게 종료합니다.
             finish()
         }
     }
