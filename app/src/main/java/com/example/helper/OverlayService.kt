@@ -102,9 +102,9 @@ class OverlayService : Service() {
         val image = imageReader?.acquireLatestImage() ?: return
         try {
             val planes = image.planes
-            val buffer = planes.buffer
-            val pixelStride = planes.pixelStride
-            val rowStride = planes.rowStride
+            val buffer = planes[0].buffer
+            val pixelStride = planes[0].pixelStride
+            val rowStride = planes[0].rowStride
             val rowPadding = rowStride - pixelStride * screenWidth
 
             val bitmap = Bitmap.createBitmap(screenWidth + rowPadding / pixelStride, screenHeight, Bitmap.Config.ARGB_8888)
