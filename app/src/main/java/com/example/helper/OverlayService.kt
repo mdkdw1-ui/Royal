@@ -54,7 +54,6 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        // Android 14 안정성을 위해 핵심 알림창 등록 로직은 onStartCommand로 이동합니다.
     }
 
     private fun createNotificationChannel() {
@@ -69,12 +68,11 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // 💡 [안드로이드 14 핵심 수정] 인텐트를 받자마자 0.001초라도 지체없이 포그라운드 서비스로 승격
         try {
             createNotificationChannel()
             val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
                 .setContentTitle("로얄매치 도우미 작동 중")
-                .setContentText("백그라운드 스레드에서 초고속으로 매칭 패턴을 분석 중입니다.")
+                .setContentText("백그라운드 스레드에서 매칭 패턴을 분석 중입니다.")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .build()
 
@@ -96,7 +94,6 @@ class OverlayService : Service() {
             screenWidth = metrics.widthPixels
             screenHeight = metrics.heightPixels
 
-            // 1. 투명 힌트 가이드 라인 뷰 생성
             overlayView = PatternDrawView(this)
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
@@ -111,7 +108,6 @@ class OverlayService : Service() {
                 Log.e(TAG, "Failed to add overlay view", e)
             }
 
-            // 2. 실행 상태 표시기 + 킬 스위치 생성 (이제 안전하게 표시됨)
             showControlOverlay()
 
             val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
@@ -131,13 +127,25 @@ class OverlayService : Service() {
                 backgroundHandler = Handler(backgroundThread!!.looper)
 
                 imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+                
+                // 💡 액티비티가 전면에 살아있는 상태이므로 가상 디스플레이가 에러 없이 완벽하게 생성됩니다.
                 virtualDisplay = mediaProjection?.createVirtualDisplay(
                     "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
                 )
                 
                 backgroundHandler?.post(analyzeRunnable)
-                Log.d(TAG, "서비스가 에러 없이 성공적으로 루프를 시작했습니다.")
+                Log.d(TAG, "서비스가 성공적으로 루프를 시작했습니다.")
+
+                // 💡 [안드로이드 14 핵심 수정] 모든 캡처 연동이 끝났으니, 메인 액티비티에게 안전하게 숨으라고 신호를 보냅니다.
+                val minimizeIntent = Intent(this, MainActivity::class.java).apply {
+                    action = Intent.ACTION_MAIN
+                    addCategory(Intent.CATEGORY_LAUNCHER)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    putExtra("ACTION_MINIMIZE", true)
+                }
+                startActivity(minimizeIntent)
+
             } else {
                 Log.e(TAG, "dataIntent가 누락되었습니다.")
                 stopSelf()
