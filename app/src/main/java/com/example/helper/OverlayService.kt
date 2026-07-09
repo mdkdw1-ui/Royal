@@ -23,13 +23,18 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.util.DisplayMetrics
+import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import android.widget.LinearLayout
+import android.widget.TextView
 import androidx.core.app.NotificationCompat
 
 class OverlayService : Service() {
     private var windowManager: WindowManager? = null
     private var overlayView: PatternDrawView? = null
+    private var widgetView: LinearLayout? = null // 💡 킬 스위치를 포함할 독립형 소형 위젯 레이아웃
+    
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
@@ -55,7 +60,6 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // 알림창 생성
         val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
             .setContentTitle("로얄매치 도우미 작동 중")
             .setContentText("실시간으로 5개 매칭 패턴을 감지하고 있습니다.")
@@ -63,7 +67,6 @@ class OverlayService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
-        // 💡 [안드로이드 14 대응] 서비스 시작 시 미디어 프로젝션 타입을 명시하여 크래시를 방지합니다.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else {
@@ -76,7 +79,7 @@ class OverlayService : Service() {
         screenWidth = metrics.widthPixels
         screenHeight = metrics.heightPixels
 
-        // 오버레이 뷰가 중복으로 생성되지 않도록 안전장치 마련
+        // 1. 투명 힌트 레이어 설치 (전체화면, 클릭 관통)
         if (overlayView == null) {
             overlayView = PatternDrawView(this)
             val params = WindowManager.LayoutParams(
@@ -93,13 +96,79 @@ class OverlayService : Service() {
             }
         }
 
+        // 2. 💡 [기능 추가] 작동 상태창 및 킬 스위치 전용 터치 가능 레이어 설치
+        if (widgetView == null) {
+            val density = resources.displayMetrics.density
+            
+            widgetView = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                background = android.graphics.drawable.GradientDrawable().apply {
+                    setColor(Color.parseColor("#AA000000")) // 반투명 검정 배경
+                    cornerRadius = 12f * density // 둥근 모서리
+                }
+                setPadding((12 * density).toInt(), (8 * density).toInt(), (12 * density).toInt(), (8 * density).toInt())
+            }
+
+            // 초록색 불빛 점
+            val dotView = TextView(this).apply {
+                text = "● "
+                setTextColor(Color.parseColor("#00FF66"))
+                textSize = 13f
+            }
+
+            // 안내 문구
+            val textView = TextView(this).apply {
+                text = "도우미 작동 중 "
+                setTextColor(Color.WHITE)
+                textSize = 13f
+                paint.isFakeBoldText = true
+            }
+
+            // 🔥 킬 스위치 버튼 [종료]
+            val killButton = TextView(this).apply {
+                text = " [종료]"
+                setTextColor(Color.parseColor("#FF3B30")) // 선명한 빨간색
+                textSize = 13f
+                paint.isFakeBoldText = true
+                setPadding((4 * density).toInt(), 0, (4 * density).toInt(), 0)
+                
+                // 클릭 시 도우미 즉시 완전 종료
+                setOnClickListener {
+                    stopSelf() 
+                }
+            }
+
+            widgetView?.addView(dotView)
+            widgetView?.addView(textView)
+            widgetView?.addView(killButton)
+
+            // 버튼 클릭이 먹혀야 하므로 FLAG_NOT_TOUCHABLE을 넣지 않습니다.
+            val widgetParams = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = 40
+                y = 130
+            }
+
+            try {
+                windowManager?.addView(widgetView, widgetParams)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
         val dataIntent = intent?.getParcelableExtra<Intent>("DATA_INTENT")
         if (dataIntent != null && mediaProjection == null) {
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             try {
                 mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
-                
                 imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
                 virtualDisplay = mediaProjection?.createVirtualDisplay(
                     "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
@@ -117,135 +186,99 @@ class OverlayService : Service() {
     private val analyzeRunnable = object : Runnable {
         override fun run() {
             analyzeScreen()
-            handler.postDelayed(this, 1000) // 분석 주기를 1초로 소폭 늘려 과부하 방지
+            handler.postDelayed(this, 1000)
         }
     }
 
     private fun analyzeScreen() {
-        // 이미지 래더가 없거나 이미지를 가져오지 못하면 크래시 없이 리턴
         val image = try { imageReader?.acquireLatestImage() } catch (e: Exception) { null } ?: return
-        
-        // 💡 전체 로직을 대형 try-catch로 감싸서, 내부 연산 오류로 인해 앱이 종료되는 문제를 원천 차단합니다.
         try {
-            val planes = image.planes
-            if (planes == null || planes.isEmpty()) return
-            
+            val planes = image.planes ?: return
+            if (planes.isEmpty()) return
             val buffer = planes[0].buffer ?: return
             val pixelStride = planes[0].pixelStride
             val rowStride = planes[0].rowStride
             val rowPadding = rowStride - pixelStride * screenWidth
 
-            // 안전하게 비트맵 생성 시도
             val bitmapWidth = screenWidth + if (pixelStride > 0) rowPadding / pixelStride else 0
             if (bitmapWidth <= 0 || screenHeight <= 0) return
-            
             val bitmap = Bitmap.createBitmap(bitmapWidth, screenHeight, Bitmap.Config.ARGB_8888)
             bitmap.copyPixelsFromBuffer(buffer)
 
-            var boardTop = 0
-            var boardBottom = 0
-            var boardLeft = 0
-            var boardRight = 0
-
+            var boardTop = 0; var boardBottom = 0; var boardLeft = 0; var boardRight = 0
             val centerX = screenWidth / 2
             val startY = (screenHeight * 0.25).toInt()
             val endY = (screenHeight * 0.80).toInt()
 
-            // 1. 보드판의 상하 경계 탐색 (비트맵 범위 초과 방지 조치)
             for (y in startY until minOf(endY, bitmap.height)) {
                 if (centerX >= bitmap.width) break
                 val pixel = bitmap.getPixel(centerX, y)
-                val r = Color.red(pixel)
-                val g = Color.green(pixel)
-                val b = Color.blue(pixel)
-
+                val r = Color.red(pixel); val g = Color.green(pixel); val b = Color.blue(pixel)
                 if (r in 30..95 && g in 25..85 && b in 20..80) {
                     if (boardTop == 0) boardTop = y
                     boardBottom = y
                 }
             }
-
             if (boardTop == 0 || boardBottom == 0 || (boardBottom - boardTop) < 300) {
                 boardTop = (screenHeight * 0.35).toInt()
                 boardBottom = (screenHeight * 0.75).toInt()
             }
 
-            // 2. 보드판의 좌우 경계 탐색
             val targetMidY = minOf(boardTop + (boardBottom - boardTop) / 2, bitmap.height - 1)
             for (x in (screenWidth * 0.02).toInt() until minOf(centerX, bitmap.width)) {
-                val pixel = bitmap.getPixel(x, targetMidY)
-                if (Color.red(pixel) in 30..95) {
-                    boardLeft = x
-                    break
-                }
+                if (Color.red(bitmap.getPixel(x, targetMidY)) in 30..95) { boardLeft = x; break }
             }
             for (x in minOf((screenWidth * 0.98).toInt(), bitmap.width - 1) downTo centerX) {
                 if (x < 0) break
-                val pixel = bitmap.getPixel(x, targetMidY)
-                if (Color.red(pixel) in 30..95) {
-                    boardRight = x
-                    break
-                }
+                if (Color.red(bitmap.getPixel(x, targetMidY)) in 30..95) { boardRight = x; break }
             }
-
             if (boardLeft == 0 || boardRight == 0 || (boardRight - boardLeft) < 500) {
-                boardLeft = (screenWidth * 0.05).toInt()
-                boardRight = (screenWidth * 0.95).toInt()
+                boardLeft = (screenWidth * 0.05).toInt(); boardRight = (screenWidth * 0.95).toInt()
             }
 
             val totalWidth = boardRight - boardLeft
             val currentCols = if (totalWidth / 8 > screenWidth * 0.105) 8 else 9
             val currentRows = currentCols
             val blockSize = totalWidth / currentCols
-
             val colorGrid = Array(currentRows) { IntArray(currentCols) }
 
-            // 3. 각 칸의 픽셀 색상 채취 및 2차원 배열 매핑
             for (r in 0 until currentRows) {
                 for (c in 0 until currentCols) {
                     val pixelX = boardLeft + (c * blockSize) + (blockSize / 2)
                     val pixelY = boardTop + (r * blockSize) + (blockSize / 2)
-                    if (pixelX >= 0 && pixelX < bitmap.width && pixelY >= 0 && pixelY < bitmap.height) {
-                        val pixel = bitmap.getPixel(pixelX, pixelY)
-                        colorGrid[r][c] = simplifyColor(pixel)
+                    if (pixelX in 0 until bitmap.width && pixelY in 0 until bitmap.height) {
+                        colorGrid[r][c] = simplifyColor(bitmap.getPixel(pixelX, pixelY))
                     }
                 }
             }
-
-            // 비트맵 자원 즉시 해제하여 메모리 부족(OOM) 방지
             bitmap.recycle()
 
-            // 4. 5개 매칭 탐색 후 결과 반영
             val hint = findFiveMatch(colorGrid, currentRows, currentCols)
             if (hint != null) {
                 val fx = boardLeft + (hint.fromC * blockSize) + (blockSize / 2).toFloat()
                 val fy = boardTop + (hint.fromR * blockSize) + (blockSize / 2).toFloat()
                 val tx = boardLeft + (hint.toC * blockSize) + (blockSize / 2).toFloat()
                 val ty = boardTop + (hint.toR * blockSize) + (blockSize / 2).toFloat()
-                
                 overlayView?.setHint(fx, fy, tx, ty, blockSize.toFloat())
             } else {
                 overlayView?.clearHint()
             }
-
         } catch (e: Exception) {
-            e.printStackTrace() // 어떤 에러가 나든 기록만 하고 앱이 꺼지진 않음
+            e.printStackTrace()
         } finally {
             try { image.close() } catch (e: Exception) {}
         }
     }
 
     private fun simplifyColor(pixel: Int): Int {
-        val r = Color.red(pixel)
-        val g = Color.green(pixel)
-        val b = Color.blue(pixel)
-        
+        val r = Color.red(pixel); val g = Color.green(pixel); val b = Color.blue(pixel)
+        if (r + g + b < 120) return 0
         return when {
-            r > 200 && g < 60 && b < 60 -> 1    // 책 (빨강)
-            r < 60 && g > 100 && b > 200 -> 2   // 왕관 (파랑)
-            r > 210 && g > 180 && b < 50 -> 3   // 동전 (노랑)
-            r < 60 && g > 180 && b < 90 -> 4    // 클로버 (초록)
-            r > 140 && g < 60 && b > 180 -> 5   // 모자 (보라)
+            r > 130 && r > g * 1.3 && r > b * 1.3 -> 1
+            b > 120 && b > r * 1.15 && b > g * 1.05 -> 2
+            r > 140 && g > 130 && b < 120 -> 3
+            g > 110 && g > r * 1.2 && g > b * 1.2 -> 4
+            r > 110 && b > 120 && g < 100 -> 5
             else -> 0
         }
     }
@@ -258,18 +291,11 @@ class OverlayService : Service() {
             for (c in 0 until cols) {
                 if (grid[r][c] == 0) continue
                 for (dir in directions) {
-                    val nr = r + dir.first
-                    val nc = c + dir.second
+                    val nr = r + dir.first; val nc = c + dir.second
                     if (nr < rows && nc < cols && grid[nr][nc] != 0) {
-                        val temp = grid[r][c]
-                        grid[r][c] = grid[nr][nc]
-                        grid[nr][nc] = temp
-
-                        if (checkBoardMatch5(grid, rows, cols)) {
-                            return MatchHint(r, c, nr, nc)
-                        }
-                        grid[nr][nc] = grid[r][c]
-                        grid[r][c] = temp
+                        val temp = grid[r][c]; grid[r][c] = grid[nr][nc]; grid[nr][nc] = temp
+                        if (checkBoardMatch5(grid, rows, cols)) return MatchHint(r, c, nr, nc)
+                        grid[nr][nc] = grid[r][c]; grid[r][c] = temp
                     }
                 }
             }
@@ -300,7 +326,10 @@ class OverlayService : Service() {
             virtualDisplay?.release()
             imageReader?.close()
             mediaProjection?.stop()
-            if (overlayView != null) windowManager?.removeView(overlayView)
+            
+            // 💡 종료 시 모든 창 제거
+            if (overlayView != null) { windowManager?.removeView(overlayView); overlayView = null }
+            if (widgetView != null) { windowManager?.removeView(widgetView); widgetView = null }
         } catch (e: Exception) {
             e.printStackTrace()
         }
