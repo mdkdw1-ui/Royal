@@ -52,8 +52,29 @@ class OverlayService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    // 💡 [코파일럿 제안 반영] 서비스가 생성되는 가장 첫 단계인 onCreate에서 알림창을 등록하여 안정성 확보
     override fun onCreate() {
         super.onCreate()
+        Log.d(TAG, "OverlayService onCreate 호출됨")
+        try {
+            createNotificationChannel()
+            val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
+                .setContentTitle("로얄매치 도우미 작동 중")
+                .setContentText("백그라운드 스레드에서 매칭 패턴을 분석 중입니다.")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            } else {
+                startForeground(1, notification)
+            }
+            Log.d(TAG, "Foreground 서비스 승격 성공")
+        } catch (e: Exception) {
+            Log.e(TAG, "onCreate 단계에서 포그라운드 승격 실패", e)
+            stopSelf()
+        }
     }
 
     private fun createNotificationChannel() {
@@ -68,64 +89,58 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // 💡 [안드로이드 14 핵심 수정 1] 진입하자마자 최최상단에서 알림창 등록 및 포그라운드 승격
-        try {
-            createNotificationChannel()
-            val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
-                .setContentTitle("로얄매치 도우미 작동 중")
-                .setContentText("백그라운드 스레드에서 매칭 패턴을 분석 중입니다.")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .build()
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-            } else {
-                startForeground(1, notification)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "startForeground 승격 실패", e)
+        Log.d(TAG, "OverlayService onStartCommand 호출됨")
+        
+        val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
+        val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableExtra<Intent>("DATA_INTENT")
+        }
+        
+        if (dataIntent == null) {
+            Log.e(TAG, "dataIntent가 누락되어 서비스를 종료합니다.")
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // 💡 [안드로이드 14 핵심 수정 2] 승격 직후 "0.001초의 지체도 없이" 곧바로 미디어 프로젝션 활성화 수행 (타이밍 트랩 우회)
         try {
-            val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
-            val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent?.getParcelableExtra<Intent>("DATA_INTENT")
-            }
-            
-            if (dataIntent == null) {
-                Log.e(TAG, "dataIntent가 누락되었습니다.")
-                stopSelf()
-                return START_NOT_STICKY
-            }
-
             windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val metrics = DisplayMetrics()
             windowManager?.defaultDisplay?.getRealMetrics(metrics)
             screenWidth = metrics.widthPixels
             screenHeight = metrics.heightPixels
 
+            // 미디어 프로젝션 등록 연동 시작
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
+            Log.d(TAG, "mediaProjection 객체 획득 성공")
             
             backgroundThread = HandlerThread("ScreenCaptureThread").apply { start() }
             backgroundHandler = Handler(backgroundThread!!.looper)
 
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+            
+            // 💡 여기서 에러가 나면 catch문으로 빠집니다. 액티비티가 켜진 상태라 무조건 성공해야 합니다.
             virtualDisplay = mediaProjection?.createVirtualDisplay(
                 "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
             )
+            Log.d(TAG, "VirtualDisplay 가상 디스플레이 연결 완벽 성공!")
             
             backgroundHandler?.post(analyzeRunnable)
-            Log.d(TAG, "MediaProjection 주입 완벽 성공!")
 
-            // 💡 [안드로이드 14 핵심 수정 3] 연동이 끝났으므로 시스템 홈화면을 강제 호출하여 안전하게 백그라운드로 전환
+            // 💡 [핵심 타이밍 수정] 화면 캡처 장치 연결이 100% 완료되었으므로, 이제 메인 액티비티를 종료(finish)하라고 신호를 보냄
+            val finishIntent = Intent(this, MainActivity::class.java).apply {
+                action = Intent.ACTION_MAIN
+                addCategory(Intent.CATEGORY_LAUNCHER)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                putExtra("ACTION_FINISH", true)
+            }
+            startActivity(finishIntent)
+
+            // 동시에 시스템 홈화면을 띄워 자연스럽게 바탕화면으로 이동
             val homeIntent = Intent(Intent.ACTION_MAIN).apply {
                 addCategory(Intent.CATEGORY_HOME)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -133,12 +148,12 @@ class OverlayService : Service() {
             startActivity(homeIntent)
 
         } catch (e: Exception) {
-            Log.e(TAG, "미디어 프로젝션 연동 실패 (타이밍 혹은 권한 누락)", e)
+            Log.e(TAG, "미디어 프로젝션 연동 실패!! 크래시 로그 확인 필요", e)
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // 💡 [안드로이드 14 핵심 수정 4] 연동이 완전히 끝난 뒤 안전하게 오버레이 가이드 뷰와 제어 바를 화면에 그립니다.
+        // 오버레이 뷰 드로잉
         try {
             overlayView = PatternDrawView(this)
             val params = WindowManager.LayoutParams(
@@ -149,10 +164,9 @@ class OverlayService : Service() {
                 PixelFormat.TRANSLUCENT
             )
             windowManager?.addView(overlayView, params)
-            
             showControlOverlay()
         } catch (e: Exception) {
-            Log.e(TAG, "오버레이 화면 구성 중 예외 발생", e)
+            Log.e(TAG, "오버레이 그리기 실패", e)
         }
 
         return START_NOT_STICKY
@@ -161,7 +175,6 @@ class OverlayService : Service() {
     private fun showControlOverlay() {
         try {
             val themedContext = ContextThemeWrapper(this, androidx.appcompat.R.style.Theme_AppCompat_Light_NoActionBar)
-            
             controlView = LinearLayout(themedContext).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -184,9 +197,7 @@ class OverlayService : Service() {
                 setTextColor(Color.WHITE)
                 setBackgroundColor(Color.parseColor("#FF3B30")) 
                 textSize = 11f
-                setOnClickListener {
-                    stopSelf() 
-                }
+                setOnClickListener { stopSelf() }
             }
 
             controlView?.addView(statusText)
@@ -203,20 +214,15 @@ class OverlayService : Service() {
                 x = 40
                 y = 150 
             }
-
             windowManager?.addView(controlView, controlParams)
         } catch (e: Exception) {
-            Log.e(TAG, "showControlOverlay failed", e)
+            Log.e(TAG, "컨트롤바 띄우기 실패", e)
         }
     }
 
     private val analyzeRunnable = object : Runnable {
         override fun run() {
-            try {
-                analyzeScreenFast()
-            } catch (e: Exception) {
-                Log.e(TAG, "analyzeScreenFast error", e)
-            }
+            try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "분석 에러", e) }
             backgroundHandler?.postDelayed(this, 800)
         }
     }
@@ -229,7 +235,6 @@ class OverlayService : Service() {
             val pixelStride = planes[0].pixelStride  
             val rowStride = planes[0].rowStride      
             val rowPadding = rowStride - pixelStride * screenWidth
-
             val adjustedWidth = screenWidth + rowPadding / pixelStride
 
             if (reusableBitmap == null || reusableBitmap!!.width != adjustedWidth || reusableBitmap!!.height != screenHeight) {
@@ -244,18 +249,13 @@ class OverlayService : Service() {
             var boardBottom = 0
             var boardLeft = 0
             var boardRight = 0
-
             val centerX = screenWidth / 2
             val startY = (screenHeight * 0.25).toInt()
             val endY = (screenHeight * 0.80).toInt()
 
             for (y in startY..endY) {
                 val pixel = bitmap.getPixel(centerX, y)
-                val r = Color.red(pixel)
-                val g = Color.green(pixel)
-                val b = Color.blue(pixel)
-
-                if (r in 30..95 && g in 25..85 && b in 20..80) {
+                if (Color.red(pixel) in 30..95 && Color.green(pixel) in 25..85 && Color.blue(pixel) in 20..80) {
                     if (boardTop == 0) boardTop = y
                     boardBottom = y
                 }
@@ -268,18 +268,10 @@ class OverlayService : Service() {
 
             val targetMidY = boardTop + (boardBottom - boardTop) / 2
             for (x in (screenWidth * 0.02).toInt() until centerX) {
-                val pixel = bitmap.getPixel(x, targetMidY)
-                if (Color.red(pixel) in 30..95) {
-                    boardLeft = x
-                    break
-                }
+                if (Color.red(bitmap.getPixel(x, targetMidY)) in 30..95) { boardLeft = x; break }
             }
             for (x in (screenWidth * 0.98).toInt() downTo centerX) {
-                val pixel = bitmap.getPixel(x, targetMidY)
-                if (Color.red(pixel) in 30..95) {
-                    boardRight = x
-                    break
-                }
+                if (Color.red(bitmap.getPixel(x, targetMidY)) in 30..95) { boardRight = x; break }
             }
 
             if (boardLeft == 0 || boardRight == 0 || (boardRight - boardLeft) < 500) {
@@ -295,39 +287,26 @@ class OverlayService : Service() {
                 for (c in 0 until GRID_COLS) {
                     val pixelX = boardLeft + (c * blockSize) + (blockSize / 2)
                     val pixelY = boardTop + (r * blockSize) + (blockSize / 2)
-                    
                     if (pixelX >= 0 && pixelX < bitmap.width && pixelY >= 0 && pixelY < bitmap.height) {
-                        val pixel = bitmap.getPixel(pixelX, pixelY)
-                        colorGrid[r][c] = identifyColorSpec(pixel)
+                        colorGrid[r][c] = identifyColorSpec(bitmap.getPixel(pixelX, pixelY))
                     }
                 }
             }
 
             val hint = findFiveMatchPattern(colorGrid, GRID_ROWS, GRID_COLS)
-            
             if (hint != null) {
                 val fx = boardLeft + (hint.fromC * blockSize) + (blockSize / 2).toFloat()
                 val fy = boardTop + (hint.fromR * blockSize) + (blockSize / 2).toFloat()
                 val tx = boardLeft + (hint.toC * blockSize) + (blockSize / 2).toFloat()
                 val ty = boardTop + (hint.toR * blockSize) + (blockSize / 2).toFloat()
-                
-                overlayView?.post {
-                    overlayView?.setHint(fx, fy, tx, ty, blockSize.toFloat())
-                }
+                overlayView?.post { overlayView?.setHint(fx, fy, tx, ty, blockSize.toFloat()) }
             } else {
-                overlayView?.post {
-                    overlayView?.clearHint()
-                }
+                overlayView?.post { overlayView?.clearHint() }
             }
-
-        } catch (e: Throwable) { 
-            Log.e(TAG, "analyzeScreenFast exception", e)
+        } catch (e: Throwable) {
+            Log.e(TAG, "analyzeScreenFast 실패", e)
         } finally {
-            try {
-                image.close()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error closing image", e)
-            }
+            try { image.close() } catch (e: Exception) {}
         }
     }
 
@@ -335,9 +314,7 @@ class OverlayService : Service() {
         val r = Color.red(pixel)
         val g = Color.green(pixel)
         val b = Color.blue(pixel)
-        
         if (r + g + b < 100) return 0 
-
         return when {
             r > 150 && g > 140 && b < 130 -> 3
             r > 140 && g < 90 && b < 90   -> 1
@@ -362,11 +339,7 @@ class OverlayService : Service() {
                         val temp = grid[r][c]
                         grid[r][c] = grid[nr][nc]
                         grid[nr][nc] = temp
-
-                        if (checkGridMatch5(grid, rows, cols)) {
-                            return MatchHint(r, c, nr, nc)
-                        }
-                        
+                        if (checkGridMatch5(grid, rows, cols)) return MatchHint(r, c, nr, nc)
                         grid[nr][nc] = grid[r][c]
                         grid[r][c] = temp
                     }
@@ -400,18 +373,12 @@ class OverlayService : Service() {
             virtualDisplay?.release()
             imageReader?.close()
             mediaProjection?.stop()
-            
-            reusableBitmap?.recycle() 
+            reusableBitmap?.recycle()
             reusableBitmap = null
-
-            if (overlayView != null && windowManager != null) {
-                windowManager?.removeView(overlayView)
-            }
-            if (controlView != null && windowManager != null) {
-                windowManager?.removeView(controlView)
-            }
+            if (overlayView != null) windowManager?.removeView(overlayView)
+            if (controlView != null) windowManager?.removeView(controlView)
         } catch (e: Exception) {
-            Log.e(TAG, "Error in onDestroy", e)
+            Log.e(TAG, "onDestroy 실패", e)
         }
     }
 }
