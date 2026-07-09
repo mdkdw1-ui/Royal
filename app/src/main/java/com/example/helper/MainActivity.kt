@@ -8,17 +8,20 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import android.widget.Button
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 
 class MainActivity : AppCompatActivity() {
+    private val TAG = "MainActivity"
     private val OVERLAY_PERMISSION_REQ_CODE = 1000
     private val SCREEN_CAPTURE_REQ_CODE = 1001
     private lateinit var mediaProjectionManager: MediaProjectionManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Log.d(TAG, "MainActivity onCreate")
         
         val startButton = Button(this).apply { 
             text = "로얄매치 패턴 도우미 시작" 
@@ -48,8 +51,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        // 💡 [해결] 존재하지 않는 오타 구문(addAllOn...)을 완전히 제거했습니다.
         super.onActivityResult(requestCode, resultCode, data)
+        Log.d(TAG, "onActivityResult: requestCode=$requestCode, resultCode=$resultCode")
         
         when (requestCode) {
             OVERLAY_PERMISSION_REQ_CODE -> {
@@ -62,6 +65,7 @@ class MainActivity : AppCompatActivity() {
             SCREEN_CAPTURE_REQ_CODE -> {
                 if (resultCode == Activity.RESULT_OK && data != null) {
                     try {
+                        Log.d(TAG, "OverlayService 기동 준비 중...")
                         val serviceIntent = Intent(this, OverlayService::class.java).apply {
                             putExtra("RESULT_CODE", resultCode)
                             putExtra("DATA_INTENT", data)
@@ -71,7 +75,9 @@ class MainActivity : AppCompatActivity() {
                         } else {
                             startService(serviceIntent)
                         }
+                        // 💡 [주의] 여기서 finish나 moveTaskToBack을 절대 하지 않고 가만히 대기합니다.
                     } catch (e: Exception) {
+                        Log.e(TAG, "서비스 시작 실패", e)
                         Toast.makeText(this, "서비스 시작 실패: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
                 } else {
@@ -81,10 +87,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // 💡 서비스에서 캡처 장치 주입을 완벽하게 끝내면 이쪽으로 신호가 와서 그때 안전하게 앱을 종료합니다.
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
-        if (intent?.getBooleanExtra("ACTION_MINIMIZE", false) == true) {
-            moveTaskToBack(true)
+        if (intent?.getBooleanExtra("ACTION_FINISH", false) == true) {
+            Log.d(TAG, "서비스 결속 성공 신호 수신. 액티비티를 종료합니다.")
+            finish()
         }
     }
 }
