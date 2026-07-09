@@ -54,23 +54,7 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        try {
-            createNotificationChannel()
-            val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
-                .setContentTitle("로얄매치 도우미 작동 중")
-                .setContentText("백그라운드 스레드에서 초고속으로 매칭 패턴을 분석 중입니다.")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .build()
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-            } else {
-                startForeground(1, notification)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "onCreate failed", e)
-            stopSelf()
-        }
+        // Android 14 안정성을 위해 핵심 알림창 등록 로직은 onStartCommand로 이동합니다.
     }
 
     private fun createNotificationChannel() {
@@ -85,6 +69,26 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 💡 [안드로이드 14 핵심 수정] 인텐트를 받자마자 0.001초라도 지체없이 포그라운드 서비스로 승격
+        try {
+            createNotificationChannel()
+            val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
+                .setContentTitle("로얄매치 도우미 작동 중")
+                .setContentText("백그라운드 스레드에서 초고속으로 매칭 패턴을 분석 중입니다.")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .build()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            } else {
+                startForeground(1, notification)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "startForeground 승격 실패", e)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         return try {
             windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val metrics = DisplayMetrics()
@@ -107,12 +111,11 @@ class OverlayService : Service() {
                 Log.e(TAG, "Failed to add overlay view", e)
             }
 
-            // 2. 실행 상태 표시기 + 킬 스위치 생성
+            // 2. 실행 상태 표시기 + 킬 스위치 생성 (이제 안전하게 표시됨)
             showControlOverlay()
 
             val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
             
-            // 안드로이드 13 이상 버전을 위한 인텐트 추출 기법
             val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
             } else {
@@ -134,14 +137,14 @@ class OverlayService : Service() {
                 )
                 
                 backgroundHandler?.post(analyzeRunnable)
-                Log.d(TAG, "Service started successfully")
+                Log.d(TAG, "서비스가 에러 없이 성공적으로 루프를 시작했습니다.")
             } else {
-                Log.e(TAG, "dataIntent is null")
+                Log.e(TAG, "dataIntent가 누락되었습니다.")
                 stopSelf()
             }
             START_NOT_STICKY
         } catch (e: Exception) {
-            Log.e(TAG, "onStartCommand failed", e)
+            Log.e(TAG, "onStartCommand 내부 실패", e)
             stopSelf()
             START_NOT_STICKY
         }
