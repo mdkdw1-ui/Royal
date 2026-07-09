@@ -7,6 +7,7 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -17,6 +18,7 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
+import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -41,12 +43,6 @@ class OverlayService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
-            .setContentTitle("로얄매치 도우미 작동 중")
-            .setContentText("실시간으로 5개 매칭 패턴을 감지하고 있습니다.")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .build()
-        startForeground(1, notification)
     }
 
     private fun createNotificationChannel() {
@@ -59,34 +55,61 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 알림창 생성
+        val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
+            .setContentTitle("로얄매치 도우미 작동 중")
+            .setContentText("실시간으로 5개 매칭 패턴을 감지하고 있습니다.")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .build()
+
+        // 💡 [안드로이드 14 대응] 서비스 시작 시 미디어 프로젝션 타입을 명시하여 크래시를 방지합니다.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } else {
+            startForeground(1, notification)
+        }
+
         windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val metrics = DisplayMetrics()
         windowManager?.defaultDisplay?.getRealMetrics(metrics)
         screenWidth = metrics.widthPixels
         screenHeight = metrics.heightPixels
 
-        overlayView = PatternDrawView(this)
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
-            PixelFormat.TRANSLUCENT
-        )
-        windowManager?.addView(overlayView, params)
+        // 오버레이 뷰가 중복으로 생성되지 않도록 안전장치 마련
+        if (overlayView == null) {
+            overlayView = PatternDrawView(this)
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                PixelFormat.TRANSLUCENT
+            )
+            try {
+                windowManager?.addView(overlayView, params)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
 
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
         val dataIntent = intent?.getParcelableExtra<Intent>("DATA_INTENT")
-        if (dataIntent != null) {
+        if (dataIntent != null && mediaProjection == null) {
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
-            
-            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-            virtualDisplay = mediaProjection?.createVirtualDisplay(
-                "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, null
-            )
-            handler.post(analyzeRunnable)
+            try {
+                mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
+                
+                imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+                virtualDisplay = mediaProjection?.createVirtualDisplay(
+                    "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, null
+                )
+                handler.removeCallbacks(analyzeRunnable)
+                handler.post(analyzeRunnable)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
         }
         return START_NOT_STICKY
     }
@@ -94,20 +117,29 @@ class OverlayService : Service() {
     private val analyzeRunnable = object : Runnable {
         override fun run() {
             analyzeScreen()
-            handler.postDelayed(this, 800) // 0.8초마다 반복 분석
+            handler.postDelayed(this, 1000) // 분석 주기를 1초로 소폭 늘려 과부하 방지
         }
     }
 
     private fun analyzeScreen() {
-        val image = imageReader?.acquireLatestImage() ?: return
+        // 이미지 래더가 없거나 이미지를 가져오지 못하면 크래시 없이 리턴
+        val image = try { imageReader?.acquireLatestImage() } catch (e: Exception) { null } ?: return
+        
+        // 💡 전체 로직을 대형 try-catch로 감싸서, 내부 연산 오류로 인해 앱이 종료되는 문제를 원천 차단합니다.
         try {
             val planes = image.planes
-            val buffer = planes[0].buffer
+            if (planes == null || planes.isEmpty()) return
+            
+            val buffer = planes[0].buffer ?: return
             val pixelStride = planes[0].pixelStride
             val rowStride = planes[0].rowStride
             val rowPadding = rowStride - pixelStride * screenWidth
 
-            val bitmap = Bitmap.createBitmap(screenWidth + rowPadding / pixelStride, screenHeight, Bitmap.Config.ARGB_8888)
+            // 안전하게 비트맵 생성 시도
+            val bitmapWidth = screenWidth + if (pixelStride > 0) rowPadding / pixelStride else 0
+            if (bitmapWidth <= 0 || screenHeight <= 0) return
+            
+            val bitmap = Bitmap.createBitmap(bitmapWidth, screenHeight, Bitmap.Config.ARGB_8888)
             bitmap.copyPixelsFromBuffer(buffer)
 
             var boardTop = 0
@@ -119,8 +151,9 @@ class OverlayService : Service() {
             val startY = (screenHeight * 0.25).toInt()
             val endY = (screenHeight * 0.80).toInt()
 
-            // 1. 보드판의 상하 경계 탐색
-            for (y in startY..endY) {
+            // 1. 보드판의 상하 경계 탐색 (비트맵 범위 초과 방지 조치)
+            for (y in startY until minOf(endY, bitmap.height)) {
+                if (centerX >= bitmap.width) break
                 val pixel = bitmap.getPixel(centerX, y)
                 val r = Color.red(pixel)
                 val g = Color.green(pixel)
@@ -138,15 +171,16 @@ class OverlayService : Service() {
             }
 
             // 2. 보드판의 좌우 경계 탐색
-            val targetMidY = boardTop + (boardBottom - boardTop) / 2
-            for (x in (screenWidth * 0.02).toInt() until centerX) {
+            val targetMidY = minOf(boardTop + (boardBottom - boardTop) / 2, bitmap.height - 1)
+            for (x in (screenWidth * 0.02).toInt() until minOf(centerX, bitmap.width)) {
                 val pixel = bitmap.getPixel(x, targetMidY)
                 if (Color.red(pixel) in 30..95) {
                     boardLeft = x
                     break
                 }
             }
-            for (x in (screenWidth * 0.98).toInt() downTo centerX) {
+            for (x in minOf((screenWidth * 0.98).toInt(), bitmap.width - 1) downTo centerX) {
+                if (x < 0) break
                 val pixel = bitmap.getPixel(x, targetMidY)
                 if (Color.red(pixel) in 30..95) {
                     boardRight = x
@@ -171,12 +205,15 @@ class OverlayService : Service() {
                 for (c in 0 until currentCols) {
                     val pixelX = boardLeft + (c * blockSize) + (blockSize / 2)
                     val pixelY = boardTop + (r * blockSize) + (blockSize / 2)
-                    if (pixelX < bitmap.width && pixelY < bitmap.height) {
+                    if (pixelX >= 0 && pixelX < bitmap.width && pixelY >= 0 && pixelY < bitmap.height) {
                         val pixel = bitmap.getPixel(pixelX, pixelY)
                         colorGrid[r][c] = simplifyColor(pixel)
                     }
                 }
             }
+
+            // 비트맵 자원 즉시 해제하여 메모리 부족(OOM) 방지
+            bitmap.recycle()
 
             // 4. 5개 매칭 탐색 후 결과 반영
             val hint = findFiveMatch(colorGrid, currentRows, currentCols)
@@ -192,13 +229,12 @@ class OverlayService : Service() {
             }
 
         } catch (e: Exception) {
-            e.printStackTrace()
+            e.printStackTrace() // 어떤 에러가 나든 기록만 하고 앱이 꺼지진 않음
         } finally {
-            image.close()
+            try { image.close() } catch (e: Exception) {}
         }
     }
 
-    // 로얄 매치 전용 블록 색상 스펙트럼 보정
     private fun simplifyColor(pixel: Int): Int {
         val r = Color.red(pixel)
         val g = Color.green(pixel)
@@ -216,7 +252,6 @@ class OverlayService : Service() {
 
     data class MatchHint(val fromR: Int, val fromC: Int, val toR: Int, val toC: Int)
 
-    // 한 칸 스왑 시뮬레이션을 통한 Match-5 탐색
     private fun findFiveMatch(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
         val directions = arrayOf(Pair(0, 1), Pair(1, 0))
         for (r in 0 until rows) {
@@ -261,9 +296,13 @@ class OverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(analyzeRunnable)
-        virtualDisplay?.release()
-        imageReader?.close()
-        mediaProjection?.stop()
-        if (overlayView != null) windowManager?.removeView(overlayView)
+        try {
+            virtualDisplay?.release()
+            imageReader?.close()
+            mediaProjection?.stop()
+            if (overlayView != null) windowManager?.removeView(overlayView)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 }
