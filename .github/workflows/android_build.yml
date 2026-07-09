@@ -18,13 +18,14 @@ jobs:
       with:
         java-version: '17'
         distribution: 'temurin'
-        cache: gradle
 
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
+    # gradlew 대신 GitHub 전용 Gradle 빌드 엔진을 불러옵니다.
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v4
 
+    # 내장된 gradle 명령어로 바로 빌드를 실행합니다.
     - name: Build with Gradle
-      run: ./gradlew assembleDebug
+      run: gradle assembleDebug
 
     - name: Upload Build Artifact APK
       uses: actions/upload-artifact@v4
