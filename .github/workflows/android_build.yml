@@ -19,11 +19,12 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
 
-    # gradlew 대신 GitHub 전용 Gradle 빌드 엔진을 불러옵니다.
+    # 💡 Gradle 버전을 안정적인 8.5로 강제 지정하여 호환성 문제를 해결합니다.
     - name: Setup Gradle
       uses: gradle/actions/setup-gradle@v4
+      with:
+        gradle-version: '8.5'
 
-    # 내장된 gradle 명령어로 바로 빌드를 실행합니다.
     - name: Build with Gradle
       run: gradle assembleDebug
 
