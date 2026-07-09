@@ -48,7 +48,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.addAllOnActivityResult(requestCode, resultCode, data)
+        // 💡 [해결] 존재하지 않는 오타 구문(addAllOn...)을 완전히 제거했습니다.
         super.onActivityResult(requestCode, resultCode, data)
         
         when (requestCode) {
@@ -71,7 +71,6 @@ class MainActivity : AppCompatActivity() {
                         } else {
                             startService(serviceIntent)
                         }
-                        // 💡 [중요] 여기서 즉시 moveTaskToBack을 하지 않고, 서비스가 준비될 때까지 전면을 유지합니다.
                     } catch (e: Exception) {
                         Toast.makeText(this, "서비스 시작 실패: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
@@ -82,7 +81,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // 💡 [안드로이드 14 대응 핵심 추가] 서비스가 모든 준비를 끝내고 신호를 보내면 그때 홈화면으로 안전하게 내려갑니다.
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
         if (intent?.getBooleanExtra("ACTION_MINIMIZE", false) == true) {
