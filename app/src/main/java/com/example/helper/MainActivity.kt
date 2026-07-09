@@ -48,6 +48,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.addAllOnActivityResult(requestCode, resultCode, data)
         super.onActivityResult(requestCode, resultCode, data)
         
         when (requestCode) {
@@ -70,11 +71,7 @@ class MainActivity : AppCompatActivity() {
                         } else {
                             startService(serviceIntent)
                         }
-                        
-                        // 💡 [안드로이드 14 핵심 수정] finish()로 액티비티를 죽이지 않고, 
-                        // 홈 화면으로 안전하게 내려 프로세스의 권한(주도권)을 유지합니다.
-                        moveTaskToBack(true) 
-                        
+                        // 💡 [중요] 여기서 즉시 moveTaskToBack을 하지 않고, 서비스가 준비될 때까지 전면을 유지합니다.
                     } catch (e: Exception) {
                         Toast.makeText(this, "서비스 시작 실패: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
@@ -82,6 +79,14 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this, "화면 캡처 권한이 거부되었습니다.", Toast.LENGTH_SHORT).show()
                 }
             }
+        }
+    }
+
+    // 💡 [안드로이드 14 대응 핵심 추가] 서비스가 모든 준비를 끝내고 신호를 보내면 그때 홈화면으로 안전하게 내려갑니다.
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        if (intent?.getBooleanExtra("ACTION_MINIMIZE", false) == true) {
+            moveTaskToBack(true)
         }
     }
 }
