@@ -68,6 +68,7 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 💡 [안드로이드 14 핵심 수정 1] 진입하자마자 최최상단에서 알림창 등록 및 포그라운드 승격
         try {
             createNotificationChannel()
             val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
@@ -87,13 +88,58 @@ class OverlayService : Service() {
             return START_NOT_STICKY
         }
 
-        return try {
+        // 💡 [안드로이드 14 핵심 수정 2] 승격 직후 "0.001초의 지체도 없이" 곧바로 미디어 프로젝션 활성화 수행 (타이밍 트랩 우회)
+        try {
+            val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
+            val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent?.getParcelableExtra<Intent>("DATA_INTENT")
+            }
+            
+            if (dataIntent == null) {
+                Log.e(TAG, "dataIntent가 누락되었습니다.")
+                stopSelf()
+                return START_NOT_STICKY
+            }
+
             windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val metrics = DisplayMetrics()
             windowManager?.defaultDisplay?.getRealMetrics(metrics)
             screenWidth = metrics.widthPixels
             screenHeight = metrics.heightPixels
 
+            val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
+            
+            backgroundThread = HandlerThread("ScreenCaptureThread").apply { start() }
+            backgroundHandler = Handler(backgroundThread!!.looper)
+
+            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
+            )
+            
+            backgroundHandler?.post(analyzeRunnable)
+            Log.d(TAG, "MediaProjection 주입 완벽 성공!")
+
+            // 💡 [안드로이드 14 핵심 수정 3] 연동이 끝났으므로 시스템 홈화면을 강제 호출하여 안전하게 백그라운드로 전환
+            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(homeIntent)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "미디어 프로젝션 연동 실패 (타이밍 혹은 권한 누락)", e)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        // 💡 [안드로이드 14 핵심 수정 4] 연동이 완전히 끝난 뒤 안전하게 오버레이 가이드 뷰와 제어 바를 화면에 그립니다.
+        try {
             overlayView = PatternDrawView(this)
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
@@ -102,60 +148,14 @@ class OverlayService : Service() {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
                 PixelFormat.TRANSLUCENT
             )
-            try { 
-                windowManager?.addView(overlayView, params) 
-            } catch (e: Exception) { 
-                Log.e(TAG, "Failed to add overlay view", e)
-            }
-
+            windowManager?.addView(overlayView, params)
+            
             showControlOverlay()
-
-            val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
-            
-            val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent?.getParcelableExtra<Intent>("DATA_INTENT")
-            }
-            
-            if (dataIntent != null) {
-                val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
-                
-                backgroundThread = HandlerThread("ScreenCaptureThread").apply { start() }
-                backgroundHandler = Handler(backgroundThread!!.looper)
-
-                imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-                
-                // 💡 액티비티가 전면에 살아있는 상태이므로 가상 디스플레이가 에러 없이 완벽하게 생성됩니다.
-                virtualDisplay = mediaProjection?.createVirtualDisplay(
-                    "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
-                )
-                
-                backgroundHandler?.post(analyzeRunnable)
-                Log.d(TAG, "서비스가 성공적으로 루프를 시작했습니다.")
-
-                // 💡 [안드로이드 14 핵심 수정] 모든 캡처 연동이 끝났으니, 메인 액티비티에게 안전하게 숨으라고 신호를 보냅니다.
-                val minimizeIntent = Intent(this, MainActivity::class.java).apply {
-                    action = Intent.ACTION_MAIN
-                    addCategory(Intent.CATEGORY_LAUNCHER)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                    putExtra("ACTION_MINIMIZE", true)
-                }
-                startActivity(minimizeIntent)
-
-            } else {
-                Log.e(TAG, "dataIntent가 누락되었습니다.")
-                stopSelf()
-            }
-            START_NOT_STICKY
         } catch (e: Exception) {
-            Log.e(TAG, "onStartCommand 내부 실패", e)
-            stopSelf()
-            START_NOT_STICKY
+            Log.e(TAG, "오버레이 화면 구성 중 예외 발생", e)
         }
+
+        return START_NOT_STICKY
     }
 
     private fun showControlOverlay() {
@@ -204,11 +204,7 @@ class OverlayService : Service() {
                 y = 150 
             }
 
-            try {
-                windowManager?.addView(controlView, controlParams)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to add control view", e)
-            }
+            windowManager?.addView(controlView, controlParams)
         } catch (e: Exception) {
             Log.e(TAG, "showControlOverlay failed", e)
         }
