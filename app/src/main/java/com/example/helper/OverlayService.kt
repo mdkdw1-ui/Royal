@@ -28,6 +28,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.view.ContextThemeWrapper
+import androidx.core.app.NotificationCompat // 💡 [해결] 누락되었던 핵심 임포트 추가
 
 class OverlayService : Service() {
     private var windowManager: WindowManager? = null
@@ -46,7 +47,7 @@ class OverlayService : Service() {
     private val GRID_COLS = 8
     private val GRID_ROWS = 8
 
-    // 💡 [OOM 방지 핵심] 비트맵을 매번 새로 생성하지 않고, 단 한 장만 만들어놓고 재사용합니다.
+    // 비트맵을 매번 새로 생성하지 않고, 단 한 장만 만들어놓고 재사용 (OOM 방지)
     private var reusableBitmap: Bitmap? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -99,7 +100,7 @@ class OverlayService : Service() {
 
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
         
-        // 💡 [안정성 강화] 안드로이드 13(Tiramisu) 이상 버전을 위한 안전한 인텐트 추출 기법 적용
+        // 안드로이드 13 이상 버전을 위한 인텐트 추출 기법
         val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
         } else {
@@ -125,7 +126,7 @@ class OverlayService : Service() {
         return START_NOT_STICKY
     }
 
-    // 💡 [크래시 해결 핵심] 서비스 컨텍스트를 AppCompat 테마로 강제 래핑하여 뷰 생성 에러를 방지합니다.
+    // 서비스 컨텍스트를 테마로 감싸 뷰 테마 에러 방지
     private fun showControlOverlay() {
         val themedContext = ContextThemeWrapper(this, androidx.appcompat.R.style.Theme_AppCompat_Light_NoActionBar)
         
@@ -196,13 +197,12 @@ class OverlayService : Service() {
 
             val adjustedWidth = screenWidth + rowPadding / pixelStride
 
-            // 💡 [메모리 성능 최적화] 매 프레임 할당하던 구조를 탈피하여 최초 1회만 비트맵을 메모리에 올립니다.
             if (reusableBitmap == null || reusableBitmap!!.width != adjustedWidth || reusableBitmap!!.height != screenHeight) {
                 reusableBitmap = Bitmap.createBitmap(adjustedWidth, screenHeight, Bitmap.Config.ARGB_8888)
             }
             
             val bitmap = reusableBitmap!!
-            buffer.rewind() // 버퍼 포인터 초기화 후 주입
+            buffer.rewind() 
             bitmap.copyPixelsFromBuffer(buffer)
 
             var boardTop = 0
@@ -285,7 +285,7 @@ class OverlayService : Service() {
                 }
             }
 
-        } catch (e: Throwable) { // 💡 [안정성 강화] Exception뿐만 아니라 OutOfMemoryError 계열까지 전부 방어
+        } catch (e: Throwable) { 
             e.printStackTrace()
         } finally {
             image.close() 
@@ -361,7 +361,7 @@ class OverlayService : Service() {
         imageReader?.close()
         mediaProjection?.stop()
         
-        reusableBitmap?.recycle() // 메모리 해제
+        reusableBitmap?.recycle() 
         reusableBitmap = null
 
         if (overlayView != null) {
