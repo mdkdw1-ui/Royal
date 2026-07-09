@@ -52,7 +52,6 @@ class OverlayService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // 💡 [코파일럿 제안 반영] 서비스가 생성되는 가장 첫 단계인 onCreate에서 알림창을 등록하여 안정성 확보
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "OverlayService onCreate 호출됨")
@@ -112,7 +111,6 @@ class OverlayService : Service() {
             screenWidth = metrics.widthPixels
             screenHeight = metrics.heightPixels
 
-            // 미디어 프로젝션 등록 연동 시작
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
             Log.d(TAG, "mediaProjection 객체 획득 성공")
@@ -120,9 +118,19 @@ class OverlayService : Service() {
             backgroundThread = HandlerThread("ScreenCaptureThread").apply { start() }
             backgroundHandler = Handler(backgroundThread!!.looper)
 
+            // 💡 [안드로이드 14 핵심 해결책] createVirtualDisplay 호출 전에 반드시 콜백을 등록해야 에러가 안 납니다!
+            mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    super.onStop()
+                    Log.d(TAG, "MediaProjection이 시스템에 의해 중지되었습니다.")
+                    stopSelf()
+                }
+            }, backgroundHandler)
+            Log.d(TAG, "MediaProjection 필수 콜백 등록 완료")
+
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
             
-            // 💡 여기서 에러가 나면 catch문으로 빠집니다. 액티비티가 켜진 상태라 무조건 성공해야 합니다.
+            // 콜백이 등록되었으므로 여기서 더 이상 크래시가 나지 않고 정상 통과합니다.
             virtualDisplay = mediaProjection?.createVirtualDisplay(
                 "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
@@ -131,7 +139,7 @@ class OverlayService : Service() {
             
             backgroundHandler?.post(analyzeRunnable)
 
-            // 💡 [핵심 타이밍 수정] 화면 캡처 장치 연결이 100% 완료되었으므로, 이제 메인 액티비티를 종료(finish)하라고 신호를 보냄
+            // 💡 연결이 완벽히 성공했으므로 안심하고 MainActivity에 신호를 보냅니다.
             val finishIntent = Intent(this, MainActivity::class.java).apply {
                 action = Intent.ACTION_MAIN
                 addCategory(Intent.CATEGORY_LAUNCHER)
@@ -139,13 +147,6 @@ class OverlayService : Service() {
                 putExtra("ACTION_FINISH", true)
             }
             startActivity(finishIntent)
-
-            // 동시에 시스템 홈화면을 띄워 자연스럽게 바탕화면으로 이동
-            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
-                addCategory(Intent.CATEGORY_HOME)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            startActivity(homeIntent)
 
         } catch (e: Exception) {
             Log.e(TAG, "미디어 프로젝션 연동 실패!! 크래시 로그 확인 필요", e)
