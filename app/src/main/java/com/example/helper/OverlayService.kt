@@ -27,12 +27,12 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
-import androidx.core.app.NotificationCompat
+import androidx.appcompat.view.ContextThemeWrapper
 
 class OverlayService : Service() {
     private var windowManager: WindowManager? = null
     private var overlayView: PatternDrawView? = null
-    private var controlView: LinearLayout? = null // 💡 실행 상태 및 킬 스위치를 담을 오버레이 박스
+    private var controlView: LinearLayout? = null 
     
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
@@ -46,6 +46,9 @@ class OverlayService : Service() {
     private val GRID_COLS = 8
     private val GRID_ROWS = 8
 
+    // 💡 [OOM 방지 핵심] 비트맵을 매번 새로 생성하지 않고, 단 한 장만 만들어놓고 재사용합니다.
+    private var reusableBitmap: Bitmap? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -57,7 +60,6 @@ class OverlayService : Service() {
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .build()
 
-        // 💡 [튕김 해결 핵심] Android 10(Q) 이상 버전에서는 미디어 프로젝션 타입을 반드시 명시해야 튕기지 않습니다.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else {
@@ -81,7 +83,7 @@ class OverlayService : Service() {
         screenWidth = metrics.widthPixels
         screenHeight = metrics.heightPixels
 
-        // 1. 투명 힌트 라인 뷰 생성 및 윈도우 추가
+        // 1. 투명 힌트 가이드 라인 뷰 생성
         overlayView = PatternDrawView(this)
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
@@ -92,11 +94,18 @@ class OverlayService : Service() {
         )
         try { windowManager?.addView(overlayView, params) } catch (e: Exception) { e.printStackTrace() }
 
-        // 2. 💡 [신규 기능] 실행 상태 표시기 + 킬 스위치 컨트롤 레이아웃 동적 생성
+        // 2. 실행 상태 표시기 + 킬 스위치 생성
         showControlOverlay()
 
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
-        val dataIntent = intent?.getParcelableExtra<Intent>("DATA_INTENT")
+        
+        // 💡 [안정성 강화] 안드로이드 13(Tiramisu) 이상 버전을 위한 안전한 인텐트 추출 기법 적용
+        val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableExtra<Intent>("DATA_INTENT")
+        }
         
         if (dataIntent != null) {
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -116,35 +125,32 @@ class OverlayService : Service() {
         return START_NOT_STICKY
     }
 
-    // 💡 [신규 기능] 화면 우상단에 띄울 조그만 컨트롤러 박스 (작동 표시등 + STOP 버튼)
+    // 💡 [크래시 해결 핵심] 서비스 컨텍스트를 AppCompat 테마로 강제 래핑하여 뷰 생성 에러를 방지합니다.
     private fun showControlOverlay() {
-        val context = this
-        controlView = LinearLayout(context).apply {
+        val themedContext = ContextThemeWrapper(this, androidx.appcompat.R.style.Theme_AppCompat_Light_NoActionBar)
+        
+        controlView = LinearLayout(themedContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(30, 15, 30, 15)
-            // 반투명한 검은색 라운드 배경 만들기
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#AA000000")) 
                 cornerRadius = 30f
             }
         }
 
-        // "● RUNNING" 초록색 텍스트
-        val statusText = TextView(context).apply {
+        val statusText = TextView(themedContext).apply {
             text = "● RUNNING"
             setTextColor(Color.GREEN)
             textSize = 12f
             setPadding(0, 0, 25, 0)
         }
 
-        // "STOP" 킬 스위치 버튼
-        val stopButton = Button(context).apply {
+        val stopButton = Button(themedContext).apply {
             text = "STOP"
             setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#FF3B30")) // 아이폰 스타일 레드
+            setBackgroundColor(Color.parseColor("#FF3B30")) 
             textSize = 11f
-            // 버튼을 클릭하면 서비스 자체가 안전하게 파괴(종료)됩니다.
             setOnClickListener {
                 stopSelf() 
             }
@@ -153,7 +159,6 @@ class OverlayService : Service() {
         controlView?.addView(statusText)
         controlView?.addView(stopButton)
 
-        // 클릭이 먹혀야 하므로 FLAG_NOT_TOUCHABLE은 넣지 않습니다. 대신 포커스만 안 뺏기게 설정.
         val controlParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -161,9 +166,9 @@ class OverlayService : Service() {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
-            gravity = Gravity.TOP or Gravity.END // 우측 상단 배치
+            gravity = Gravity.TOP or Gravity.END 
             x = 40
-            y = 120 // 상단 바 겹침 방지 여백
+            y = 150 
         }
 
         try {
@@ -189,7 +194,15 @@ class OverlayService : Service() {
             val rowStride = planes[0].rowStride      
             val rowPadding = rowStride - pixelStride * screenWidth
 
-            val bitmap = Bitmap.createBitmap(screenWidth + rowPadding / pixelStride, screenHeight, Bitmap.Config.ARGB_8888)
+            val adjustedWidth = screenWidth + rowPadding / pixelStride
+
+            // 💡 [메모리 성능 최적화] 매 프레임 할당하던 구조를 탈피하여 최초 1회만 비트맵을 메모리에 올립니다.
+            if (reusableBitmap == null || reusableBitmap!!.width != adjustedWidth || reusableBitmap!!.height != screenHeight) {
+                reusableBitmap = Bitmap.createBitmap(adjustedWidth, screenHeight, Bitmap.Config.ARGB_8888)
+            }
+            
+            val bitmap = reusableBitmap!!
+            buffer.rewind() // 버퍼 포인터 초기화 후 주입
             bitmap.copyPixelsFromBuffer(buffer)
 
             var boardTop = 0
@@ -248,7 +261,7 @@ class OverlayService : Service() {
                     val pixelX = boardLeft + (c * blockSize) + (blockSize / 2)
                     val pixelY = boardTop + (r * blockSize) + (blockSize / 2)
                     
-                    if (pixelX < bitmap.width && pixelY < bitmap.height) {
+                    if (pixelX >= 0 && pixelX < bitmap.width && pixelY >= 0 && pixelY < bitmap.height) {
                         val pixel = bitmap.getPixel(pixelX, pixelY)
                         colorGrid[r][c] = identifyColorSpec(pixel)
                     }
@@ -272,7 +285,7 @@ class OverlayService : Service() {
                 }
             }
 
-        } catch (e: Exception) {
+        } catch (e: Throwable) { // 💡 [안정성 강화] Exception뿐만 아니라 OutOfMemoryError 계열까지 전부 방어
             e.printStackTrace()
         } finally {
             image.close() 
@@ -343,12 +356,14 @@ class OverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         backgroundHandler?.removeCallbacks(analyzeRunnable)
-        backgroundThread?.quitSafely() // 💡 오타 수정 완료됨
+        backgroundThread?.quitSafely() 
         virtualDisplay?.release()
         imageReader?.close()
         mediaProjection?.stop()
         
-        // 서비스가 꺼질 때 띄워둔 모든 오버레이 창을 안전하게 철거합니다.
+        reusableBitmap?.recycle() // 메모리 해제
+        reusableBitmap = null
+
         if (overlayView != null) {
             windowManager?.removeView(overlayView)
         }
