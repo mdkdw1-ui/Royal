@@ -22,15 +22,17 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.view.ContextThemeWrapper
-import androidx.core.app.NotificationCompat // 💡 [해결] 누락되었던 핵심 임포트 추가
+import androidx.core.app.NotificationCompat
 
 class OverlayService : Service() {
+    private val TAG = "OverlayService"
     private var windowManager: WindowManager? = null
     private var overlayView: PatternDrawView? = null
     private var controlView: LinearLayout? = null 
@@ -46,142 +48,168 @@ class OverlayService : Service() {
     private var screenHeight = 2400
     private val GRID_COLS = 8
     private val GRID_ROWS = 8
-
-    // 비트맵을 매번 새로 생성하지 않고, 단 한 장만 만들어놓고 재사용 (OOM 방지)
     private var reusableBitmap: Bitmap? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        createNotificationChannel()
-        val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
-            .setContentTitle("로얄매치 도우미 작동 중")
-            .setContentText("백그라운드 스레드에서 초고속으로 매칭 패턴을 분석 중입니다.")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .build()
+        try {
+            createNotificationChannel()
+            val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
+                .setContentTitle("로얄매치 도우미 작동 중")
+                .setContentText("백그라운드 스레드에서 초고속으로 매칭 패턴을 분석 중입니다.")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-        } else {
-            startForeground(1, notification)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            } else {
+                startForeground(1, notification)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "onCreate failed", e)
+            stopSelf()
         }
     }
 
     private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            "helper_channel", "로얄매치 서비스",
-            NotificationManager.IMPORTANCE_LOW
-        )
-        val manager = getSystemService(NotificationManager::class.java)
-        manager?.createNotificationChannel(channel)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                "helper_channel", "로얄매치 서비스",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.createNotificationChannel(channel)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val metrics = DisplayMetrics()
-        windowManager?.defaultDisplay?.getRealMetrics(metrics)
-        screenWidth = metrics.widthPixels
-        screenHeight = metrics.heightPixels
+        return try {
+            windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val metrics = DisplayMetrics()
+            windowManager?.defaultDisplay?.getRealMetrics(metrics)
+            screenWidth = metrics.widthPixels
+            screenHeight = metrics.heightPixels
 
-        // 1. 투명 힌트 가이드 라인 뷰 생성
-        overlayView = PatternDrawView(this)
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
-            PixelFormat.TRANSLUCENT
-        )
-        try { windowManager?.addView(overlayView, params) } catch (e: Exception) { e.printStackTrace() }
-
-        // 2. 실행 상태 표시기 + 킬 스위치 생성
-        showControlOverlay()
-
-        val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
-        
-        // 안드로이드 13 이상 버전을 위한 인텐트 추출 기법
-        val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            intent?.getParcelableExtra<Intent>("DATA_INTENT")
-        }
-        
-        if (dataIntent != null) {
-            val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
-            
-            backgroundThread = HandlerThread("ScreenCaptureThread").apply { start() }
-            backgroundHandler = Handler(backgroundThread!!.looper)
-
-            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-            virtualDisplay = mediaProjection?.createVirtualDisplay(
-                "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
+            // 1. 투명 힌트 가이드 라인 뷰 생성
+            overlayView = PatternDrawView(this)
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                PixelFormat.TRANSLUCENT
             )
+            try { 
+                windowManager?.addView(overlayView, params) 
+            } catch (e: Exception) { 
+                Log.e(TAG, "Failed to add overlay view", e)
+            }
+
+            // 2. 실행 상태 표시기 + 킬 스위치 생성
+            showControlOverlay()
+
+            val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
             
-            backgroundHandler?.post(analyzeRunnable)
+            // 안드로이드 13 이상 버전을 위한 인텐트 추출 기법
+            val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent?.getParcelableExtra<Intent>("DATA_INTENT")
+            }
+            
+            if (dataIntent != null) {
+                val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
+                
+                backgroundThread = HandlerThread("ScreenCaptureThread").apply { start() }
+                backgroundHandler = Handler(backgroundThread!!.looper)
+
+                imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+                virtualDisplay = mediaProjection?.createVirtualDisplay(
+                    "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
+                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
+                )
+                
+                backgroundHandler?.post(analyzeRunnable)
+                Log.d(TAG, "Service started successfully")
+            } else {
+                Log.e(TAG, "dataIntent is null")
+                stopSelf()
+            }
+            START_NOT_STICKY
+        } catch (e: Exception) {
+            Log.e(TAG, "onStartCommand failed", e)
+            stopSelf()
+            START_NOT_STICKY
         }
-        return START_NOT_STICKY
     }
 
-    // 서비스 컨텍스트를 테마로 감싸 뷰 테마 에러 방지
     private fun showControlOverlay() {
-        val themedContext = ContextThemeWrapper(this, androidx.appcompat.R.style.Theme_AppCompat_Light_NoActionBar)
-        
-        controlView = LinearLayout(themedContext).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(30, 15, 30, 15)
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#AA000000")) 
-                cornerRadius = 30f
-            }
-        }
-
-        val statusText = TextView(themedContext).apply {
-            text = "● RUNNING"
-            setTextColor(Color.GREEN)
-            textSize = 12f
-            setPadding(0, 0, 25, 0)
-        }
-
-        val stopButton = Button(themedContext).apply {
-            text = "STOP"
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.parseColor("#FF3B30")) 
-            textSize = 11f
-            setOnClickListener {
-                stopSelf() 
-            }
-        }
-
-        controlView?.addView(statusText)
-        controlView?.addView(stopButton)
-
-        val controlParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.END 
-            x = 40
-            y = 150 
-        }
-
         try {
-            windowManager?.addView(controlView, controlParams)
+            val themedContext = ContextThemeWrapper(this, androidx.appcompat.R.style.Theme_AppCompat_Light_NoActionBar)
+            
+            controlView = LinearLayout(themedContext).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(30, 15, 30, 15)
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#AA000000")) 
+                    cornerRadius = 30f
+                }
+            }
+
+            val statusText = TextView(themedContext).apply {
+                text = "● RUNNING"
+                setTextColor(Color.GREEN)
+                textSize = 12f
+                setPadding(0, 0, 25, 0)
+            }
+
+            val stopButton = Button(themedContext).apply {
+                text = "STOP"
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#FF3B30")) 
+                textSize = 11f
+                setOnClickListener {
+                    stopSelf() 
+                }
+            }
+
+            controlView?.addView(statusText)
+            controlView?.addView(stopButton)
+
+            val controlParams = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.END 
+                x = 40
+                y = 150 
+            }
+
+            try {
+                windowManager?.addView(controlView, controlParams)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to add control view", e)
+            }
         } catch (e: Exception) {
-            e.printStackTrace()
+            Log.e(TAG, "showControlOverlay failed", e)
         }
     }
 
     private val analyzeRunnable = object : Runnable {
         override fun run() {
-            analyzeScreenFast()
+            try {
+                analyzeScreenFast()
+            } catch (e: Exception) {
+                Log.e(TAG, "analyzeScreenFast error", e)
+            }
             backgroundHandler?.postDelayed(this, 800)
         }
     }
@@ -286,9 +314,13 @@ class OverlayService : Service() {
             }
 
         } catch (e: Throwable) { 
-            e.printStackTrace()
+            Log.e(TAG, "analyzeScreenFast exception", e)
         } finally {
-            image.close() 
+            try {
+                image.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error closing image", e)
+            }
         }
     }
 
@@ -300,11 +332,11 @@ class OverlayService : Service() {
         if (r + g + b < 100) return 0 
 
         return when {
-            r > 150 && g > 140 && b < 130 -> 3   // 💛 노랑
-            r > 140 && g < 90 && b < 90   -> 1   // ❤️ 빨강
-            b > 140 && r < 100 && g < 130 -> 2   // 💙 파랑
-            g > 130 && r < 100 && b < 100 -> 4   // 💚 초록
-            r > 130 && b > 140 && g < 100 -> 5   // 💜 보라
+            r > 150 && g > 140 && b < 130 -> 3
+            r > 140 && g < 90 && b < 90   -> 1
+            b > 140 && r < 100 && g < 130 -> 2
+            g > 130 && r < 100 && b < 100 -> 4
+            r > 130 && b > 140 && g < 100 -> 5
             else -> 0
         }
     }
@@ -355,20 +387,24 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        backgroundHandler?.removeCallbacks(analyzeRunnable)
-        backgroundThread?.quitSafely() 
-        virtualDisplay?.release()
-        imageReader?.close()
-        mediaProjection?.stop()
-        
-        reusableBitmap?.recycle() 
-        reusableBitmap = null
+        try {
+            backgroundHandler?.removeCallbacks(analyzeRunnable)
+            backgroundThread?.quitSafely() 
+            virtualDisplay?.release()
+            imageReader?.close()
+            mediaProjection?.stop()
+            
+            reusableBitmap?.recycle() 
+            reusableBitmap = null
 
-        if (overlayView != null) {
-            windowManager?.removeView(overlayView)
-        }
-        if (controlView != null) {
-            windowManager?.removeView(controlView)
+            if (overlayView != null && windowManager != null) {
+                windowManager?.removeView(overlayView)
+            }
+            if (controlView != null && windowManager != null) {
+                windowManager?.removeView(controlView)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onDestroy", e)
         }
     }
 }
