@@ -212,7 +212,7 @@ class OverlayService : Service() {
     private val analyzeRunnable = object : Runnable {
         override fun run() {
             try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "분석 에러", e) }
-            backgroundHandler?.postDelayed(this, 600) // 분석 주기를 0.6초로 조금 더 기민하게 변경
+            backgroundHandler?.postDelayed(this, 600)
         }
     }
 
@@ -234,7 +234,6 @@ class OverlayService : Service() {
             buffer.rewind() 
             bitmap.copyPixelsFromBuffer(buffer)
 
-            // 변형 격자 맵 대응을 위한 보정용 감지 패널 범위 설정
             var boardTop = (screenHeight * 0.28).toInt()
             var boardBottom = (screenHeight * 0.82).toInt()
             var boardLeft = (screenWidth * 0.03).toInt()
@@ -244,7 +243,6 @@ class OverlayService : Service() {
             val blockSize = boardWidth / GRID_COLS
             val colorGrid = Array(GRID_ROWS) { IntArray(GRID_COLS) }
 
-            // 💡 [개선] 십자형 다중 포인트 샘플링을 통한 오탐 방지 및 격자 틀어짐 방어
             val sampleOffset = (blockSize * 0.15).toInt() 
 
             for (r in 0 until GRID_ROWS) {
@@ -255,7 +253,6 @@ class OverlayService : Service() {
                     if (pixelX >= sampleOffset && pixelX < bitmap.width - sampleOffset &&
                         pixelY >= sampleOffset && pixelY < bitmap.height - sampleOffset) {
                         
-                        // 중심점 및 상하좌우 4포인트 추가 대조
                         val points = intArrayOf(
                             bitmap.getPixel(pixelX, pixelY),
                             bitmap.getPixel(pixelX - sampleOffset, pixelY),
@@ -269,7 +266,6 @@ class OverlayService : Service() {
                             scoreMap[identifyColorSpec(p)]++
                         }
 
-                        // 빈 공간(0)을 제외하고 가장 많이 검출된 색상 스펙을 최종 선택
                         var finalColor = 0
                         var maxCount = 0
                         for (i in 1..5) {
@@ -283,7 +279,6 @@ class OverlayService : Service() {
                 }
             }
 
-            // 💡 [핵심 개선] 5매칭 -> 4매칭 -> 3매칭 순으로 유연하게 서칭하도록 로직 전환
             val hint = findBestMatchPattern(colorGrid, GRID_ROWS, GRID_COLS)
             if (hint != null) {
                 val fx = boardLeft + (hint.fromC * blockSize) + (blockSize / 2).toFloat()
@@ -296,12 +291,11 @@ class OverlayService : Service() {
             }
         } catch (e: Throwable) {
             Log.e(TAG, "analyzeScreenFast 실패", e)
-        } finaly {
+        } finally { // 💡 finaly -> finally 오타 수정 완료!
             try { image.close() } catch (e: Exception) {}
         }
     }
 
-    // 로얄매치 주요 블록 색상 범위 정밀 고도화
     private fun identifyColorSpec(pixel: Int): Int {
         val r = Color.red(pixel)
         val g = Color.green(pixel)
@@ -309,22 +303,20 @@ class OverlayService : Service() {
         
         if (r + g + b < 90) return 0 
         return when {
-            r > 145 && g > 135 && b < 100 -> 3 // 노란색 (왕관)
-            r > 150 && g < 95 && b < 95   -> 1 // 빨간색 (책)
-            b > 145 && r < 105 && g < 135 -> 2 // 파란색 (방패)
-            g > 115 && r < 125 && b < 125 -> 4 // 녹색 (나뭇잎 - 유연하게 범위 확장)
-            r > 125 && b > 140 && g < 105 -> 5 // 보라색 (새)
+            r > 145 && g > 135 && b < 100 -> 3 
+            r > 150 && g < 95 && b < 95   -> 1 
+            b > 145 && r < 105 && g < 135 -> 2 
+            g > 115 && r < 125 && b < 125 -> 4 
+            r > 125 && b > 140 && g < 105 -> 5 
             else -> 0
         }
     }
 
     data class MatchHint(val fromR: Int, val fromC: Int, val toR: Int, val toC: Int)
 
-    // 💡 [알고리즘 업그레이드] 다중 타겟 매칭 서처
     private fun findBestMatchPattern(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
         val directions = arrayOf(Pair(0, 1), Pair(1, 0))
         
-        // 5매칭 우선 탐색 -> 없으면 4매칭 -> 없으면 3매칭 순으로 역순 스캔 실행
         for (targetSize in arrayOf(5, 4, 3)) {
             for (r in 0 until rows) {
                 for (c in 0 until cols) {
@@ -333,7 +325,6 @@ class OverlayService : Service() {
                         val nr = r + dir.first
                         val nc = c + dir.second
                         if (nr < rows && nc < cols && grid[nr][nc] != 0) {
-                            // 임시 스와이프 변경
                             val temp = grid[r][c]
                             grid[r][c] = grid[nr][nc]
                             grid[nr][nc] = temp
@@ -341,7 +332,6 @@ class OverlayService : Service() {
                             if (checkGridMatchSize(grid, rows, cols, targetSize)) {
                                 return MatchHint(r, c, nr, nc)
                             }
-                            // 원복
                             grid[nr][nc] = grid[r][c]
                             grid[r][c] = temp
                         }
@@ -353,7 +343,6 @@ class OverlayService : Service() {
     }
 
     private fun checkGridMatchSize(grid: Array<IntArray>, rows: Int, cols: Int, size: Int): Boolean {
-        // 가로축 검사
         for (r in 0 until rows) {
             for (c in 0..cols - size) {
                 val color = grid[r][c]
@@ -365,7 +354,6 @@ class OverlayService : Service() {
                 if (isMatch) return true
             }
         }
-        // 세로축 검사
         for (c in 0 until cols) {
             for (r in 0..rows - size) {
                 val color = grid[r][c]
