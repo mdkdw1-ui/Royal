@@ -30,6 +30,8 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.view.ContextThemeWrapper
 import androidx.core.app.NotificationCompat
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 class OverlayService : Service() {
     private val TAG = "OverlayService"
@@ -56,7 +58,7 @@ class OverlayService : Service() {
             createNotificationChannel()
             val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
                 .setContentTitle("로얄매치 도우미 작동 중")
-                .setContentText("정밀 5인라인 스캔 모드 가동 중")
+                .setContentText("가변 동적 그리드 매칭 모드 가동 중")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build()
@@ -171,8 +173,8 @@ class OverlayService : Service() {
             }
 
             val statusText = TextView(themedContext).apply {
-                text = "● 5-LINE MATCH"
-                setTextColor(Color.YELLOW)
+                text = "● DYNAMIC MATCH"
+                setTextColor(Color.CYAN)
                 textSize = 10f 
                 setPadding(0, 0, 12, 0)
             }
@@ -209,7 +211,7 @@ class OverlayService : Service() {
     private val analyzeRunnable = object : Runnable {
         override fun run() {
             try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "분석 에러", e) }
-            backgroundHandler?.postDelayed(this, 350)
+            backgroundHandler?.postDelayed(this, 300)
         }
     }
 
@@ -234,8 +236,14 @@ class OverlayService : Service() {
             var minX = screenWidth; var maxX = 0; var minY = screenHeight; var maxY = 0
             var validPixelCount = 0
 
-            for (y in (screenHeight * 0.30).toInt() until (screenHeight * 0.85).toInt() step 6) {
-                for (x in (screenWidth * 0.05).toInt() until (screenWidth * 0.95).toInt() step 6) {
+            // 유효 영역 탐색 분할 스캔
+            val startY = (screenHeight * 0.30).toInt()
+            val endY = (screenHeight * 0.85).toInt()
+            val startX = (screenWidth * 0.05).toInt()
+            val endX = (screenWidth * 0.95).toInt()
+
+            for (y in startY until endY step 6) {
+                for (x in startX until endX step 6) {
                     if (identifyColorSpec(bitmap.getPixel(x, y)) > 0) {
                         if (x < minX) minX = x; if (x > maxX) maxX = x
                         if (y < minY) minY = y; if (y > maxY) maxY = y
@@ -249,7 +257,7 @@ class OverlayService : Service() {
                 return
             }
 
-            val padding = 15
+            val padding = 10
             val sX = maxOf(0, minX - padding); val eX = minOf(screenWidth - 1, maxX + padding)
             val sY = maxOf(0, minY - padding); val eY = minOf(screenHeight - 1, maxY + padding)
 
@@ -264,11 +272,11 @@ class OverlayService : Service() {
                 }
             }
 
-            val baseBlockSize = (screenWidth * 0.105).toInt()
+            // 💡 [개선 핵심] 동적 픽셀 중심축 탐색 알고리즘 (가변 판 구조 대응)
             val xPeaks = mutableListOf<Int>()
             val yPeaks = mutableListOf<Int>()
-            
-            // 💡 [개선] 경계선 오류를 타파하는 세그먼트 스캔 방식 (블록 중심점 정밀 포착)
+            val approxBlockSize = (screenWidth * 0.11).toInt()
+
             var inPeak = false
             var peakStart = 0
             for (x in sX until eX) {
@@ -277,7 +285,7 @@ class OverlayService : Service() {
                 } else {
                     if (inPeak) {
                         val center = (peakStart + x - 1) / 2
-                        if (xPeaks.isEmpty() || center - xPeaks.last() > baseBlockSize * 0.75) xPeaks.add(center)
+                        if (xPeaks.isEmpty() || center - xPeaks.last() > approxBlockSize * 0.7) xPeaks.add(center)
                         inPeak = false
                     }
                 }
@@ -290,7 +298,7 @@ class OverlayService : Service() {
                 } else {
                     if (inPeak) {
                         val center = (peakStart + y - 1) / 2
-                        if (yPeaks.isEmpty() || center - yPeaks.last() > baseBlockSize * 0.75) yPeaks.add(center)
+                        if (yPeaks.isEmpty() || center - yPeaks.last() > approxBlockSize * 0.7) yPeaks.add(center)
                         inPeak = false
                     }
                 }
@@ -298,31 +306,22 @@ class OverlayService : Service() {
 
             if (xPeaks.isEmpty() || yPeaks.isEmpty()) return
 
+            // 중심 축들 간의 중간 격자 간격(blockSize) 동적 계산
+            val gaps = mutableListOf<Int>()
+            for (i in 0 until xPeaks.size - 1) gaps.add(xPeaks[i+1] - xPeaks[i])
+            for (i in 0 until yPeaks.size - 1) gaps.add(yPeaks[i+1] - yPeaks[i])
+            val blockSize = if (gaps.isNotEmpty()) gaps.sorted()[gaps.size / 2] else approxBlockSize
+
             val originX = xPeaks.minOrNull()!!
             val originY = yPeaks.minOrNull()!!
-            
-            val finalDiffs = mutableListOf<Int>()
-            for (i in 0 until xPeaks.size - 1) { finalDiffs.add(xPeaks[i+1] - xPeaks[i]) }
-            for (i in 0 until yPeaks.size - 1) { finalDiffs.add(yPeaks[i+1] - yPeaks[i]) }
-            val blockSize = if (finalDiffs.isNotEmpty()) finalDiffs.sorted()[finalDiffs.size / 2] else baseBlockSize
 
-            val maxColIdx = xPeaks.map { Math.round((it - originX).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
-            val maxRowIdx = yPeaks.map { Math.round((it - originY).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
-            
-            val numCols = maxColIdx + 1
-            val numRows = maxRowIdx + 1
+            // 유동적인 가로/세로 전체 인덱스 칸 수 계산
+            val numCols = (((maxX - originX).toDouble() / blockSize).roundToInt() + 1).coerceAtLeast(1)
+            val numRows = (((maxY - originY).toDouble() / blockSize).roundToInt() + 1).coerceAtLeast(1)
 
+            // 가변 유동 그리드 생성 및 실제 물리 중심점 맵핑
             val colToX = IntArray(numCols) { originX + (it * blockSize) }
-            for (p in xPeaks) {
-                val c = Math.round((p - originX).toDouble() / blockSize).toInt()
-                if (c in 0 until numCols) colToX[c] = p
-            }
-
             val rowToY = IntArray(numRows) { originY + (it * blockSize) }
-            for (p in yPeaks) {
-                val r = Math.round((p - originY).toDouble() / blockSize).toInt()
-                if (r in 0 until numRows) rowToY[r] = p
-            }
 
             val colorGrid = Array(numRows) { IntArray(numCols) }
             val offsetShort = (blockSize * 0.15).toInt()
@@ -380,11 +379,11 @@ class OverlayService : Service() {
         val r = Color.red(pixel); val g = Color.green(pixel); val b = Color.blue(pixel)
         if (r + g + b < 100) return 0 
         return when {
-            r > 115 && r > g * 1.3 && r > b * 1.3 -> 1 
-            b > 115 && b > r * 1.2 && b > g * 1.2 -> 2 
-            r > 125 && g > 115 && b < r * 0.75 -> 3    
-            g > 100 && g > r * 1.3 && g > b * 1.3 -> 4 
-            r > 100 && b > 115 && g < r * 0.7 && g < b * 0.7 -> 5 
+            r > 120 && r > g * 1.3 && r > b * 1.3 -> 1 // 빨강
+            b > 120 && b > r * 1.2 && b > g * 1.2 -> 2 // 파랑
+            r > 130 && g > 115 && b < r * 0.75 -> 3    // 노랑
+            g > 105 && g > r * 1.3 && g > b * 1.3 -> 4 // 초록
+            r > 105 && b > 120 && g < r * 0.7 && g < b * 0.7 -> 5 // 보라
             else -> 0
         }
     }
@@ -421,48 +420,47 @@ class OverlayService : Service() {
         return null
     }
 
-    // 💡 [개선] 이펙트/문양 간섭으로 인한 미인식 공백(0)을 1개까지 유연하게 메워 5매칭 성공률 극대화
     private fun checkStrict5InRow(grid: Array<IntArray>, r: Int, c: Int, rows: Int, cols: Int): Boolean {
         val color = grid[r][c]
         if (color == 0) return false
         
-        // 가로 스캔 (미인식 보정 적용)
+        // 가로 탐색 (문양/이펙트 공백 1칸 유연 보정)
         var hCount = 1
-        var hZeros = 0
+        var hGap = 0
         var cc = c - 1
         while (cc >= 0) {
             if (grid[r][cc] == color) { hCount++ }
-            else if (grid[r][cc] == 0 && hZeros == 0) {
-                if (cc - 1 >= 0 && grid[r][cc - 1] == color) { hCount++; hZeros++ } else break
+            else if (grid[r][cc] == 0 && hGap == 0) {
+                if (cc - 1 >= 0 && grid[r][cc - 1] == color) { hCount++; hGap++ } else break
             } else break
             cc--
         }
         cc = c + 1
         while (cc < cols) {
             if (grid[r][cc] == color) { hCount++ }
-            else if (grid[r][cc] == 0 && hZeros == 0) {
-                if (cc + 1 < cols && grid[r][cc + 1] == color) { hCount++; hZeros++ } else break
+            else if (grid[r][cc] == 0 && hGap == 0) {
+                if (cc + 1 < cols && grid[r][cc + 1] == color) { hCount++; hGap++ } else break
             } else break
             cc++
         }
         if (hCount >= 5) return true
 
-        // 세로 스캔 (미인식 보정 적용)
+        // 세로 탐색 (문양/이펙트 공백 1칸 유연 보정)
         var vCount = 1
-        var vZeros = 0
+        var vGap = 0
         var rr = r - 1
         while (rr >= 0) {
             if (grid[rr][c] == color) { vCount++ }
-            else if (grid[rr][c] == 0 && vZeros == 0) {
-                if (rr - 1 >= 0 && grid[rr - 1][c] == color) { vCount++; vZeros++ } else break
+            else if (grid[rr][c] == 0 && vGap == 0) {
+                if (rr - 1 >= 0 && grid[rr - 1][c] == color) { vCount++; vGap++ } else break
             } else break
             rr--
         }
         rr = r + 1
         while (rr < rows) {
             if (grid[rr][c] == color) { vCount++ }
-            else if (grid[rr][c] == 0 && vZeros == 0) {
-                if (rr + 1 < rows && grid[rr + 1][c] == color) { vCount++; vZeros++ } else break
+            else if (grid[rr][c] == 0 && vGap == 0) {
+                if (rr + 1 < rows && grid[rr + 1][c] == color) { vCount++; vGap++ } else break
             } else break
             rr++
         }
