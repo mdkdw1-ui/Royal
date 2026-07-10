@@ -56,7 +56,7 @@ class OverlayService : Service() {
             createNotificationChannel()
             val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
                 .setContentTitle("로얄매치 도우미 작동 중")
-                .setContentText("백그라운드 스레드에서 매칭 패턴을 분석 중입니다.")
+                .setContentText("백그라운드 분석 스레드가 가동 중입니다.")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build()
@@ -67,7 +67,7 @@ class OverlayService : Service() {
                 startForeground(1, notification)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "onCreate 단계에서 포그라운드 승격 실패", e)
+            Log.e(TAG, "포그라운드 서비스 승격 실패", e)
             stopSelf()
         }
     }
@@ -118,7 +118,6 @@ class OverlayService : Service() {
             }, backgroundHandler)
 
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-            
             virtualDisplay = mediaProjection?.createVirtualDisplay(
                 "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
@@ -158,31 +157,33 @@ class OverlayService : Service() {
         return START_NOT_STICKY
     }
 
+    // 💡 [개선] 사용중(RUNNING) 표시창 크기를 최소화하고 상단으로 이동 시킴
     private fun showControlOverlay() {
         try {
             val themedContext = ContextThemeWrapper(this, androidx.appcompat.R.style.Theme_AppCompat_Light_NoActionBar)
             controlView = LinearLayout(themedContext).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(30, 15, 30, 15)
+                setPadding(15, 8, 15, 8) // 패딩 대폭 축소 (기존 30, 15)
                 background = GradientDrawable().apply {
                     setColor(Color.parseColor("#AA000000")) 
-                    cornerRadius = 30f
+                    cornerRadius = 15f
                 }
             }
 
             val statusText = TextView(themedContext).apply {
                 text = "● RUNNING"
                 setTextColor(Color.GREEN)
-                textSize = 12f
-                setPadding(0, 0, 25, 0)
+                textSize = 10f // 폰트 축소 (기존 12f)
+                setPadding(0, 0, 12, 0)
             }
 
             val stopButton = Button(themedContext).apply {
                 text = "STOP"
                 setTextColor(Color.WHITE)
                 setBackgroundColor(Color.parseColor("#FF3B30")) 
-                textSize = 11f
+                textSize = 9f // 버튼 폰트 축소 (기존 11f)
+                setPadding(10, 5, 10, 5)
                 setOnClickListener { stopSelf() }
             }
 
@@ -197,12 +198,12 @@ class OverlayService : Service() {
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.END 
-                x = 40
-                y = 150 
+                x = 20
+                y = 70 // 화면 최상단 상태바 밑으로 포지션 이동 (기존 150)
             }
             windowManager?.addView(controlView, controlParams)
         } catch (e: Exception) {
-            Log.e(TAG, "컨트롤바 띄우기 실패", e)
+            Log.e(TAG, "컨트롤바 출력 실패", e)
         }
     }
 
@@ -231,20 +232,14 @@ class OverlayService : Service() {
             buffer.rewind() 
             bitmap.copyPixelsFromBuffer(buffer)
 
-            // 💡 [개선 1] 상단 왕 UI, STOP 버튼 및 하단 아이템 바 간섭 차단을 위해 정확히 게임판 영역(30%~85%)만 제한 스캔
-            var minX = screenWidth
-            var maxX = 0
-            var minY = screenHeight
-            var maxY = 0
+            var minX = screenWidth; var maxX = 0; var minY = screenHeight; var maxY = 0
             var validPixelCount = 0
 
             for (y in (screenHeight * 0.30).toInt() until (screenHeight * 0.85).toInt() step 6) {
                 for (x in (screenWidth * 0.05).toInt() until (screenWidth * 0.95).toInt() step 6) {
                     if (identifyColorSpec(bitmap.getPixel(x, y)) > 0) {
-                        if (x < minX) minX = x
-                        if (x > maxX) maxX = x
-                        if (y < minY) minY = y
-                        if (y > maxY) maxY = y
+                        if (x < minX) minX = x; if (x > maxX) maxX = x
+                        if (y < minY) minY = y; if (y > maxY) maxY = y
                         validPixelCount++
                     }
                 }
@@ -256,10 +251,8 @@ class OverlayService : Service() {
             }
 
             val padding = 15
-            val sX = maxOf(0, minX - padding)
-            val eX = minOf(screenWidth - 1, maxX + padding)
-            val sY = maxOf(0, minY - padding)
-            val eY = minOf(screenHeight - 1, maxY + padding)
+            val sX = maxOf(0, minX - padding); val eX = minOf(screenWidth - 1, maxX + padding)
+            val sY = maxOf(0, minY - padding); val eY = minOf(screenHeight - 1, maxY + padding)
 
             val xCount = IntArray(screenWidth)
             val yCount = IntArray(screenHeight)
@@ -267,8 +260,7 @@ class OverlayService : Service() {
             for (y in sY until eY step 3) {
                 for (x in sX until eX step 3) {
                     if (identifyColorSpec(bitmap.getPixel(x, y)) > 0) {
-                        xCount[x]++
-                        yCount[y]++
+                        xCount[x]++; yCount[y]++
                     }
                 }
             }
@@ -281,12 +273,8 @@ class OverlayService : Service() {
                 val v = xCount[x]
                 if (v > 6) {
                     var isPeak = true
-                    for (w in -windowSize..windowSize) {
-                        if (xCount[x + w] > v) { isPeak = false; break }
-                    }
-                    if (isPeak && (xPeaks.isEmpty() || x - xPeaks.last() > 55)) {
-                        xPeaks.add(x)
-                    }
+                    for (w in -windowSize..windowSize) { if (xCount[x + w] > v) { isPeak = false; break } }
+                    if (isPeak && (xPeaks.isEmpty() || x - xPeaks.last() > 55)) xPeaks.add(x)
                 }
             }
 
@@ -294,38 +282,58 @@ class OverlayService : Service() {
                 val v = yCount[y]
                 if (v > 6) {
                     var isPeak = true
-                    for (w in -windowSize..windowSize) {
-                        if (yCount[y + w] > v) { isPeak = false; break }
-                    }
-                    if (isPeak && (yPeaks.isEmpty() || y - yPeaks.last() > 55)) {
-                        yPeaks.add(y)
-                    }
+                    for (w in -windowSize..windowSize) { if (yCount[y + w] > v) { isPeak = false; break } }
+                    if (isPeak && (yPeaks.isEmpty() || y - yPeaks.last() > 55)) yPeaks.add(y)
                 }
             }
 
             if (xPeaks.isEmpty() || yPeaks.isEmpty()) return
 
+            // 1차 임시 블록 사이즈 도출
             val diffs = mutableListOf<Int>()
             for (i in 0 until xPeaks.size - 1) { diffs.add(xPeaks[i+1] - xPeaks[i]) }
             for (i in 0 until yPeaks.size - 1) { diffs.add(yPeaks[i+1] - yPeaks[i]) }
-            
-            val blockSize = if (diffs.isNotEmpty()) diffs.sorted()[diffs.size / 2] else (screenWidth * 0.105).toInt()
+            val baseBlockSize = if (diffs.isNotEmpty()) diffs.sorted()[diffs.size / 2] else (screenWidth * 0.105).toInt()
 
-            // 💡 [개선 2] 피크 필터링: 계산된 blockSize의 배수 거리에 위치하지 않는 외곽 가짜 피크(UI 왜곡 등) 완전 제거
-            val validXPeaks = xPeaks.filter { p ->
-                xPeaks.any { q -> p != q && Math.abs(Math.abs(p - q) - Math.round(Math.abs(p - q).toDouble() / blockSize) * blockSize) < (blockSize * 0.18) }
+            // 💡 [개선] 노란색 황금 보드 테두리 선(Frame Line) 강제 여과 기능 추가
+            val cleanXPeaks = mutableListOf<Int>()
+            if (xPeaks.size >= 2 && (xPeaks[1] - xPeaks[0]) < baseBlockSize * 0.7) {
+                cleanXPeaks.addAll(xPeaks.subList(1, xPeaks.size))
+            } else { cleanXPeaks.addAll(xPeaks) }
+            if (cleanXPeaks.size >= 2 && (cleanXPeaks.last() - cleanXPeaks[cleanXPeaks.size - 2]) < baseBlockSize * 0.7) {
+                cleanXPeaks.removeAt(cleanXPeaks.size - 1)
             }
-            val validYPeaks = yPeaks.filter { p ->
-                yPeaks.any { q -> p != q && Math.abs(Math.abs(p - q) - Math.round(Math.abs(p - q).toDouble() / blockSize) * blockSize) < (blockSize * 0.18) }
+
+            val cleanYPeaks = mutableListOf<Int>()
+            if (yPeaks.size >= 2 && (yPeaks[1] - yPeaks[0]) < baseBlockSize * 0.7) {
+                cleanYPeaks.addAll(yPeaks.subList(1, yPeaks.size)) // 테두리 가짜 피크 탈락
+            } else { cleanYPeaks.addAll(yPeaks) }
+            if (cleanYPeaks.size >= 2 && (cleanYPeaks.last() - cleanYPeaks[cleanYPeaks.size - 2]) < baseBlockSize * 0.7) {
+                cleanYPeaks.removeAt(cleanYPeaks.size - 1)
             }
 
-            val finalXPeaks = if (validXPeaks.isNotEmpty()) validXPeaks else xPeaks
-            val finalYPeaks = if (validYPeaks.isNotEmpty()) validYPeaks else yPeaks
+            if (cleanXPeaks.isEmpty() || cleanYPeaks.isEmpty()) return
 
-            // 자석 정렬된 진성 기준점 산출
+            // 격자 자석 스냅 필터링 재실행
+            val validXPeaks = cleanXPeaks.filter { p ->
+                cleanXPeaks.any { q -> p != q && Math.abs(Math.abs(p - q) - Math.round(Math.abs(p - q).toDouble() / baseBlockSize) * baseBlockSize) < (baseBlockSize * 0.18) }
+            }
+            val validYPeaks = cleanYPeaks.filter { p ->
+                cleanYPeaks.any { q -> p != q && Math.abs(Math.abs(p - q) - Math.round(Math.abs(p - q).toDouble() / baseBlockSize) * baseBlockSize) < (baseBlockSize * 0.18) }
+            }
+
+            val finalXPeaks = if (validXPeaks.isNotEmpty()) validXPeaks else cleanXPeaks
+            val finalYPeaks = if (validYPeaks.isNotEmpty()) validYPeaks else cleanYPeaks
+
+            // 보드판 테두리가 완벽히 제거된 최종 리얼 오리진 좌표 산출
             val originX = finalXPeaks.minOrNull()!!
             val originY = finalYPeaks.minOrNull()!!
             
+            val finalDiffs = mutableListOf<Int>()
+            for (i in 0 until finalXPeaks.size - 1) { finalDiffs.add(finalXPeaks[i+1] - finalXPeaks[i]) }
+            for (i in 0 until finalYPeaks.size - 1) { finalDiffs.add(finalYPeaks[i+1] - finalYPeaks[i]) }
+            val blockSize = if (finalDiffs.isNotEmpty()) finalDiffs.sorted()[finalDiffs.size / 2] else baseBlockSize
+
             val maxColIdx = finalXPeaks.map { Math.round((it - originX).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
             val maxRowIdx = finalYPeaks.map { Math.round((it - originY).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
             
@@ -354,13 +362,8 @@ class OverlayService : Service() {
                         val scoreMap = IntArray(6)
                         for (p in points) { scoreMap[identifyColorSpec(p)]++ }
 
-                        var finalColor = 0
-                        var maxCount = 0
-                        for (i in 1..5) {
-                            if (scoreMap[i] > maxCount) {
-                                maxCount = scoreMap[i]; finalColor = i
-                            }
-                        }
+                        var finalColor = 0; var maxCount = 0
+                        for (i in 1..5) { if (scoreMap[i] > maxCount) { maxCount = scoreMap[i]; finalColor = i } }
                         colorGrid[r][c] = if (maxCount >= 2) finalColor else 0
                     }
                 }
@@ -383,18 +386,14 @@ class OverlayService : Service() {
         }
     }
 
-    // 💡 [개선 3] 절대 수치 대신 상대적 색상 비율을 활용해 기기 밝기/필터에 무관하게 책과 블록들을 정밀 식별
     private fun identifyColorSpec(pixel: Int): Int {
-        val r = Color.red(pixel)
-        val g = Color.green(pixel)
-        val b = Color.blue(pixel)
-        
+        val r = Color.red(pixel); val g = Color.green(pixel); val b = Color.blue(pixel)
         if (r + g + b < 100) return 0 
         return when {
             r > 130 && r > g * 1.4 && r > b * 1.4 -> 1 // 빨간색 (책)
             b > 130 && b > r * 1.4 && b > g * 1.4 -> 2 // 파란색 (방패)
-            r > 140 && g > 130 && b < r * 0.6 && Math.abs(r - g) < 40 -> 3 // 노란색 (왕관)
-            g > 110 && g > r * 1.4 && g > b * 1.4 -> 4 // 녹색 (나뭇잎)
+            r > 140 && g > 130 && b < r * 0.6 && Math.abs(r - g) < 40 -> 3 // 노란색 (왕관/매칭템)
+            g > 110 && g > r * 1.4 && g > b * 1.4 -> 4 // 녹색 (잎새)
             r > 120 && b > 130 && g < r * 0.6 && g < b * 0.6 -> 5 // 보라색 (새)
             else -> 0
         }
@@ -402,30 +401,25 @@ class OverlayService : Service() {
 
     data class MatchHint(val fromR: Int, val fromC: Int, val toR: Int, val toC: Int)
 
-    // 💡 [개선 4] 전체 판의 무작위 매칭 대신, 이동이 일어난 국소적 위치를 정밀 추적하여 5개짜리 대형 매칭을 최우선으로 검출
     private fun findBestMatchPattern(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
         val directions = arrayOf(Pair(0, 1), Pair(1, 0))
         
-        // 대형 특수 조합(5개 -> 4개 -> 3개) 순으로 가중치를 두고 완전 우선 탐색
+        // 5개 매칭(특수 블록 무조건 생성 조합)을 최우선 순위로 강제 탐색하도록 순서 고정
         for (targetSize in arrayOf(5, 4, 3)) {
             for (r in 0 until rows) {
                 for (c in 0 until cols) {
                     if (grid[r][c] == 0) continue
                     for (dir in directions) {
-                        val nr = r + dir.first
-                        val nc = c + dir.second
+                        val nr = r + dir.first; val nc = c + dir.second
                         if (nr < rows && nc < cols && grid[nr][nc] != 0) {
                             
-                            // 임시 스왑 실행
                             val temp = grid[r][c]
                             grid[r][c] = grid[nr][nc]
                             grid[nr][nc] = temp
                             
-                            // 스왑된 '바로 그 위치들'에서 목표로 하는 크기 이상의 매칭이 터지는지 정밀 조사
                             val m1 = checkMatchAt(grid, r, c, rows, cols)
                             val m2 = checkMatchAt(grid, nr, nc, rows, cols)
                             
-                            // 복구
                             grid[nr][nc] = grid[r][c]
                             grid[r][c] = temp
                             
@@ -440,19 +434,16 @@ class OverlayService : Service() {
         return null
     }
 
-    // 특정 셀 좌표를 관통하는 연속된 매칭 개수를 정확히 세어주는 국소 탐색 함수
     private fun checkMatchAt(grid: Array<IntArray>, r: Int, c: Int, rows: Int, cols: Int): Int {
         val color = grid[r][c]
         if (color == 0) return 0
         
-        // 가로축 스캔
         var hCount = 1
         var cc = c - 1
         while (cc >= 0 && grid[r][cc] == color) { hCount++; cc-- }
         cc = c + 1
         while (cc < cols && grid[r][cc] == color) { hCount++; cc++ }
         
-        // 세로축 스캔
         var vCount = 1
         var rr = r - 1
         while (rr >= 0 && grid[rr][c] == color) { vCount++; rr-- }
