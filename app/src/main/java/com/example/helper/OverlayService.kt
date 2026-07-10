@@ -56,7 +56,7 @@ class OverlayService : Service() {
             createNotificationChannel()
             val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
                 .setContentTitle("로얄매치 도우미 작동 중")
-                .setContentText("백그라운드 분석 스레드가 가동 중입니다.")
+                .setContentText("5인라인 콤보 집중 분석 중입니다.")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build()
@@ -171,8 +171,8 @@ class OverlayService : Service() {
             }
 
             val statusText = TextView(themedContext).apply {
-                text = "● RUNNING"
-                setTextColor(Color.GREEN)
+                text = "● 5-LINE ONLY"
+                setTextColor(Color.CYAN)
                 textSize = 10f 
                 setPadding(0, 0, 12, 0)
             }
@@ -209,7 +209,7 @@ class OverlayService : Service() {
     private val analyzeRunnable = object : Runnable {
         override fun run() {
             try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "분석 에러", e) }
-            backgroundHandler?.postDelayed(this, 500)
+            backgroundHandler?.postDelayed(this, 400)
         }
     }
 
@@ -335,21 +335,31 @@ class OverlayService : Service() {
             val numCols = maxColIdx + 1
             val numRows = maxRowIdx + 1
 
+            // 💡 [개선] 픽셀 오차 축적 방지를 위한 스냅 좌표 매핑 생성
+            val colToX = IntArray(numCols) { originX + (it * blockSize) }
+            for (peak in finalXPeaks) {
+                val c = Math.round((peak - originX).toDouble() / blockSize).toInt()
+                if (c in 0 until numCols) colToX[c] = peak
+            }
+
+            val rowToY = IntArray(numRows) { originY + (it * blockSize) }
+            for (peak in finalYPeaks) {
+                val r = Math.round((peak - originY).toDouble() / blockSize).toInt()
+                if (r in 0 until numRows) rowToY[r] = peak
+            }
+
             val colorGrid = Array(numRows) { IntArray(numCols) }
-            
-            // 💡 [개선] 내부 문양 회피형 9점 샘플링 좌표 오프셋 설정
             val offsetShort = (blockSize * 0.15).toInt()
             val offsetLong = (blockSize * 0.28).toInt()
 
             for (r in 0 until numRows) {
                 for (c in 0 until numCols) {
-                    val pixelX = originX + (c * blockSize)
-                    val pixelY = originY + (r * blockSize)
+                    val pixelX = colToX[c]
+                    val pixelY = rowToY[r]
 
                     if (pixelX >= offsetLong && pixelX < bitmap.width - offsetLong &&
                         pixelY >= offsetLong && pixelY < bitmap.height - offsetLong) {
 
-                        // 십자방향 근접 5점 + 대각방향 원격 4점 총 9점 수집
                         val points = intArrayOf(
                             bitmap.getPixel(pixelX, pixelY),
                             bitmap.getPixel(pixelX - offsetShort, pixelY),
@@ -368,7 +378,6 @@ class OverlayService : Service() {
                         var finalColor = 0; var maxCount = 0
                         for (i in 1..5) { if (scoreMap[i] > maxCount) { maxCount = scoreMap[i]; finalColor = i } }
                         
-                        // 9점 중 2점 이상 확실한 유효 색상이 잡히면 최종 인정 (인식률 200% 증가)
                         colorGrid[r][c] = if (maxCount >= 2) finalColor else identifyColorSpec(bitmap.getPixel(pixelX, pixelY))
                     }
                 }
@@ -376,10 +385,11 @@ class OverlayService : Service() {
 
             val hint = findBestMatchPattern(colorGrid, numRows, numCols)
             if (hint != null) {
-                val fx = (originX + hint.fromC * blockSize).toFloat()
-                val fy = (originY + hint.fromR * blockSize).toFloat()
-                val tx = (originX + hint.toC * blockSize).toFloat()
-                val ty = (originY + hint.toR * blockSize).toFloat()
+                // 💡 실제 감지된 피크 좌표 중심점 그대로 매핑하여 완벽히 정중앙에 선 안착시킴
+                val fx = colToX[hint.fromC].toFloat()
+                val fy = rowToY[hint.fromR].toFloat()
+                val tx = colToX[hint.toC].toFloat()
+                val ty = rowToY[hint.toR].toFloat()
                 overlayView?.post { overlayView?.setHint(fx, fy, tx, ty, blockSize.toFloat()) }
             } else {
                 overlayView?.post { overlayView?.clearHint() }
@@ -409,29 +419,26 @@ class OverlayService : Service() {
     private fun findBestMatchPattern(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
         val directions = arrayOf(Pair(0, 1), Pair(1, 0))
         
-        // 5점(폭탄/라이트볼), 4점(로켓), 3점 순서로 확실하게 가중치 분리 탐색
-        for (targetSize in arrayOf(5, 4, 3)) {
-            for (r in 0 until rows) {
-                for (c in 0 until cols) {
-                    for (dir in directions) {
-                        val nr = r + dir.first; val nc = c + dir.second
-                        if (nr < rows && nc < cols) {
-                            if (grid[r][c] == 0 && grid[nr][nc] == 0) continue
-                            
-                            val temp = grid[r][c]
-                            grid[r][c] = grid[nr][nc]
-                            grid[nr][nc] = temp
-                            
-                            val m1 = checkMatchAt(grid, r, c, rows, cols)
-                            val m2 = checkMatchAt(grid, nr, nc, rows, cols)
-                            
-                            grid[nr][nc] = grid[r][c]
-                            grid[r][c] = temp
-                            
-                            // 💡 변환된 점수가 타겟 사이즈 요구조건을 충족하는가 판별
-                            if (m1 >= targetSize || m2 >= targetSize) {
-                                return MatchHint(r, c, nr, nc)
-                            }
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                for (dir in directions) {
+                    val nr = r + dir.first; val nc = c + dir.second
+                    if (nr < rows && nc < cols) {
+                        if (grid[r][c] == 0 && grid[nr][nc] == 0) continue
+                        
+                        val temp = grid[r][c]
+                        grid[r][c] = grid[nr][nc]
+                        grid[nr][nc] = temp
+                        
+                        // 스왑 후 생성되는 매칭 탐색
+                        val is5InRow1 = checkStrict5InRow(grid, r, c, rows, cols)
+                        val is5InRow2 = checkStrict5InRow(grid, nr, nc, rows, cols)
+                        
+                        grid[nr][nc] = grid[r][c]
+                        grid[r][c] = temp
+                        
+                        if (is5InRow1 || is5InRow2) {
+                            return MatchHint(r, c, nr, nc)
                         }
                     }
                 }
@@ -440,32 +447,27 @@ class OverlayService : Service() {
         return null
     }
 
-    // 💡 [개선] T자형, L자형 다중 방향 스코어 결합 알고리즘 탑재
-    private fun checkMatchAt(grid: Array<IntArray>, r: Int, c: Int, rows: Int, cols: Int): Int {
+    // 💡 [개선] T자, L자 탈락시키고 순수 가로/세로 5개 한 줄 정렬만 체크하는 로직
+    private fun checkStrict5InRow(grid: Array<IntArray>, r: Int, c: Int, rows: Int, cols: Int): Boolean {
         val color = grid[r][c]
-        if (color == 0) return 0
+        if (color == 0) return false
         
+        // 가로 직선 연속성 체크
         var hCount = 1
         var cc = c - 1
         while (cc >= 0 && grid[r][cc] == color) { hCount++; cc-- }
         cc = c + 1
         while (cc < cols && grid[r][cc] == color) { hCount++; cc++ }
         
+        // 세로 직선 연속성 체크
         var vCount = 1
         var rr = r - 1
         while (rr >= 0 && grid[rr][c] == color) { vCount++; rr-- }
         rr = r + 1
         while (rr < rows && grid[rr][c] == color) { vCount++; rr++ }
         
-        val hMatch = if (hCount >= 3) hCount else 0
-        val vMatch = if (vCount >= 3) vCount else 0
-        
-        // 가로와 세로가 동시에 3개 이상 교차하여 폭탄 조합(5점 이상)을 만드는가?
-        return if (hMatch > 0 && vMatch > 0) {
-            hMatch + vMatch - 1 // 중복 중심점 1개 제외 후 합산 (ex: 3 + 3 - 1 = 5)
-        } else {
-            maxOf(hCount, vCount) // 한쪽 방향 단독 매칭일 경우 기존대로 최대치 선택
-        }
+        // 가로나 세로 한 줄이 정확히 5개 이상 뻗어나갈 때만 true 반환
+        return hCount >= 5 || vCount >= 5
     }
 
     override fun onDestroy() {
