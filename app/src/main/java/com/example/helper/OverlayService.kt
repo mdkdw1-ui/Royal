@@ -231,15 +231,15 @@ class OverlayService : Service() {
             buffer.rewind() 
             bitmap.copyPixelsFromBuffer(buffer)
 
-            // 💡 [단계 1] 매칭 블록들이 존재하는 유효 게임판 범위(Bounding Box) 역추적
+            // 💡 [개선 1] 상단 왕 UI, STOP 버튼 및 하단 아이템 바 간섭 차단을 위해 정확히 게임판 영역(30%~85%)만 제한 스캔
             var minX = screenWidth
             var maxX = 0
             var minY = screenHeight
             var maxY = 0
             var validPixelCount = 0
 
-            for (y in (screenHeight * 0.22).toInt() until (screenHeight * 0.88).toInt() step 6) {
-                for (x in (screenWidth * 0.01).toInt() until (screenWidth * 0.99).toInt() step 6) {
+            for (y in (screenHeight * 0.30).toInt() until (screenHeight * 0.85).toInt() step 6) {
+                for (x in (screenWidth * 0.05).toInt() until (screenWidth * 0.95).toInt() step 6) {
                     if (identifyColorSpec(bitmap.getPixel(x, y)) > 0) {
                         if (x < minX) minX = x
                         if (x > maxX) maxX = x
@@ -250,14 +250,12 @@ class OverlayService : Service() {
                 }
             }
 
-            // 블록이 너무 안 잡히면 인게임 화면이 아니므로 힌트 제거 후 스킵
             if (validPixelCount < 40) {
                 overlayView?.post { overlayView?.clearHint() }
                 return
             }
 
-            // 💡 [단계 2] 스캔 정밀 영역 재정의 및 축별 투영 프로파일링 데이터 수집
-            val padding = 20
+            val padding = 15
             val sX = maxOf(0, minX - padding)
             val eX = minOf(screenWidth - 1, maxX + padding)
             val sY = maxOf(0, minY - padding)
@@ -275,12 +273,10 @@ class OverlayService : Service() {
                 }
             }
 
-            // 💡 [단계 3] 피크 탐색 기법을 사용해 가로/세로 블록들의 실제 중심선 추출
             val xPeaks = mutableListOf<Int>()
             val yPeaks = mutableListOf<Int>()
-            val windowSize = 15 // 해상도별 블록 최소 탐색 간격
+            val windowSize = 15 
 
-            // 가로축 중심선 추출
             for (x in sX + windowSize until eX - windowSize) {
                 val v = xCount[x]
                 if (v > 6) {
@@ -294,7 +290,6 @@ class OverlayService : Service() {
                 }
             }
 
-            // 세로축 중심선 추출
             for (y in sY + windowSize until eY - windowSize) {
                 val v = yCount[y]
                 if (v > 6) {
@@ -310,20 +305,29 @@ class OverlayService : Service() {
 
             if (xPeaks.isEmpty() || yPeaks.isEmpty()) return
 
-            // 💡 [단계 4] 중심점 간격을 통해 현재 스테이지의 "실제 단일 블록 크기" 산출
             val diffs = mutableListOf<Int>()
             for (i in 0 until xPeaks.size - 1) { diffs.add(xPeaks[i+1] - xPeaks[i]) }
             for (i in 0 until yPeaks.size - 1) { diffs.add(yPeaks[i+1] - yPeaks[i]) }
             
-            // 중앙값(Median)을 취해 장애물 등으로 인한 예외 오차를 원천 차단
             val blockSize = if (diffs.isNotEmpty()) diffs.sorted()[diffs.size / 2] else (screenWidth * 0.105).toInt()
 
-            // 💡 [단계 5] 동적 좌표를 기준으로 가변 격자 구조 매핑
-            val originX = xPeaks.minOrNull()!!
-            val originY = yPeaks.minOrNull()!!
+            // 💡 [개선 2] 피크 필터링: 계산된 blockSize의 배수 거리에 위치하지 않는 외곽 가짜 피크(UI 왜곡 등) 완전 제거
+            val validXPeaks = xPeaks.filter { p ->
+                xPeaks.any { q -> p != q && Math.abs(Math.abs(p - q) - Math.round(Math.abs(p - q).toDouble() / blockSize) * blockSize) < (blockSize * 0.18) }
+            }
+            val validYPeaks = yPeaks.filter { p ->
+                yPeaks.any { q -> p != q && Math.abs(Math.abs(p - q) - Math.round(Math.abs(p - q).toDouble() / blockSize) * blockSize) < (blockSize * 0.18) }
+            }
+
+            val finalXPeaks = if (validXPeaks.isNotEmpty()) validXPeaks else xPeaks
+            val finalYPeaks = if (validYPeaks.isNotEmpty()) validYPeaks else yPeaks
+
+            // 자석 정렬된 진성 기준점 산출
+            val originX = finalXPeaks.minOrNull()!!
+            val originY = finalYPeaks.minOrNull()!!
             
-            val maxColIdx = xPeaks.map { Math.round((it - originX).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
-            val maxRowIdx = yPeaks.map { Math.round((it - originY).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
+            val maxColIdx = finalXPeaks.map { Math.round((it - originX).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
+            val maxRowIdx = finalYPeaks.map { Math.round((it - originY).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
             
             val numCols = maxColIdx + 1
             val numRows = maxRowIdx + 1
@@ -331,7 +335,6 @@ class OverlayService : Service() {
             val colorGrid = Array(numRows) { IntArray(numCols) }
             val sampleOffset = (blockSize * 0.16).toInt()
 
-            // 자동 매핑된 격자들의 실제 픽셀 중심점을 정밀 샘플링
             for (r in 0 until numRows) {
                 for (c in 0 until numCols) {
                     val pixelX = originX + (c * blockSize)
@@ -363,7 +366,6 @@ class OverlayService : Service() {
                 }
             }
 
-            // 💡 [단계 6] 최적의 매칭 패턴을 찾아내어 정확하게 자동 계산된 크기로 전달
             val hint = findBestMatchPattern(colorGrid, numRows, numCols)
             if (hint != null) {
                 val fx = (originX + hint.fromC * blockSize).toFloat()
@@ -381,27 +383,30 @@ class OverlayService : Service() {
         }
     }
 
+    // 💡 [개선 3] 절대 수치 대신 상대적 색상 비율을 활용해 기기 밝기/필터에 무관하게 책과 블록들을 정밀 식별
     private fun identifyColorSpec(pixel: Int): Int {
         val r = Color.red(pixel)
         val g = Color.green(pixel)
         val b = Color.blue(pixel)
         
-        if (r + g + b < 90) return 0 
+        if (r + g + b < 100) return 0 
         return when {
-            r > 145 && g > 135 && b < 100 -> 3 // 노란색 (왕관)
-            r > 150 && g < 95 && b < 95   -> 1 // 빨간색 (책)
-            b > 145 && r < 105 && g < 135 -> 2 // 파란색 (방패)
-            g > 115 && r < 125 && b < 125 -> 4 // 녹색 (나뭇잎)
-            r > 125 && b > 140 && g < 105 -> 5 // 보라색 (새)
+            r > 130 && r > g * 1.4 && r > b * 1.4 -> 1 // 빨간색 (책)
+            b > 130 && b > r * 1.4 && b > g * 1.4 -> 2 // 파란색 (방패)
+            r > 140 && g > 130 && b < r * 0.6 && Math.abs(r - g) < 40 -> 3 // 노란색 (왕관)
+            g > 110 && g > r * 1.4 && g > b * 1.4 -> 4 // 녹색 (나뭇잎)
+            r > 120 && b > 130 && g < r * 0.6 && g < b * 0.6 -> 5 // 보라색 (새)
             else -> 0
         }
     }
 
     data class MatchHint(val fromR: Int, val fromC: Int, val toR: Int, val toC: Int)
 
+    // 💡 [개선 4] 전체 판의 무작위 매칭 대신, 이동이 일어난 국소적 위치를 정밀 추적하여 5개짜리 대형 매칭을 최우선으로 검출
     private fun findBestMatchPattern(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
         val directions = arrayOf(Pair(0, 1), Pair(1, 0))
         
+        // 대형 특수 조합(5개 -> 4개 -> 3개) 순으로 가중치를 두고 완전 우선 탐색
         for (targetSize in arrayOf(5, 4, 3)) {
             for (r in 0 until rows) {
                 for (c in 0 until cols) {
@@ -410,15 +415,23 @@ class OverlayService : Service() {
                         val nr = r + dir.first
                         val nc = c + dir.second
                         if (nr < rows && nc < cols && grid[nr][nc] != 0) {
+                            
+                            // 임시 스왑 실행
                             val temp = grid[r][c]
                             grid[r][c] = grid[nr][nc]
                             grid[nr][nc] = temp
                             
-                            if (checkGridMatchSize(grid, rows, cols, targetSize)) {
-                                return MatchHint(r, c, nr, nc)
-                            }
+                            // 스왑된 '바로 그 위치들'에서 목표로 하는 크기 이상의 매칭이 터지는지 정밀 조사
+                            val m1 = checkMatchAt(grid, r, c, rows, cols)
+                            val m2 = checkMatchAt(grid, nr, nc, rows, cols)
+                            
+                            // 복구
                             grid[nr][nc] = grid[r][c]
                             grid[r][c] = temp
+                            
+                            if (m1 >= targetSize || m2 >= targetSize) {
+                                return MatchHint(r, c, nr, nc)
+                            }
                         }
                     }
                 }
@@ -427,30 +440,26 @@ class OverlayService : Service() {
         return null
     }
 
-    private fun checkGridMatchSize(grid: Array<IntArray>, rows: Int, cols: Int, size: Int): Boolean {
-        for (r in 0 until rows) {
-            for (c in 0..cols - size) {
-                val color = grid[r][c]
-                if (color == 0) continue
-                var isMatch = true
-                for (i in 1 until size) {
-                    if (grid[r][c + i] != color) { isMatch = false; break }
-                }
-                if (isMatch) return true
-            }
-        }
-        for (c in 0 until cols) {
-            for (r in 0..rows - size) {
-                val color = grid[r][c]
-                if (color == 0) continue
-                var isMatch = true
-                for (i in 1 until size) {
-                    if (grid[r + i][c] != color) { isMatch = false; break }
-                }
-                if (isMatch) return true
-            }
-        }
-        return false
+    // 특정 셀 좌표를 관통하는 연속된 매칭 개수를 정확히 세어주는 국소 탐색 함수
+    private fun checkMatchAt(grid: Array<IntArray>, r: Int, c: Int, rows: Int, cols: Int): Int {
+        val color = grid[r][c]
+        if (color == 0) return 0
+        
+        // 가로축 스캔
+        var hCount = 1
+        var cc = c - 1
+        while (cc >= 0 && grid[r][cc] == color) { hCount++; cc-- }
+        cc = c + 1
+        while (cc < cols && grid[r][cc] == color) { hCount++; cc++ }
+        
+        // 세로축 스캔
+        var vCount = 1
+        var rr = r - 1
+        while (rr >= 0 && grid[rr][c] == color) { vCount++; rr-- }
+        rr = r + 1
+        while (rr < rows && grid[rr][c] == color) { vCount++; rr++ }
+        
+        return maxOf(hCount, vCount)
     }
 
     override fun onDestroy() {
