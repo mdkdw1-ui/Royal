@@ -47,8 +47,6 @@ class OverlayService : Service() {
     private var screenWidth = 1080
     private var screenHeight = 2400
     private var pixelArray: IntArray? = null
-    
-    // 💡 안 튕기게 하기 위한 핵심: 가비지 컬렉터(GC) 폭발 방지용 비트맵 재사용 객체
     private var reusableBitmap: Bitmap? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -62,6 +60,7 @@ class OverlayService : Service() {
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
 
+        // 안드로이드 10(Q) 이상 버전의 가이드라인에 맞춰 미디어 프로젝션 타입 선언
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
         } else {
@@ -77,40 +76,79 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 💡 [핵심 개선] 재실행 시 기존에 돌고 있던 세션이 있다면 흔적도 없이 완전히 박살내고 새로 시작합니다.
+        stopCurrentCapture()
+
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
         val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
         } else {
             @Suppress("DEPRECATION")
             intent?.getParcelableExtra<Intent>("DATA_INTENT")
-        } ?: return START_NOT_STICKY
+        } 
 
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val metrics = DisplayMetrics()
-        windowManager?.defaultDisplay?.getRealMetrics(metrics)
-        screenWidth = metrics.widthPixels
-        screenHeight = metrics.heightPixels
-        pixelArray = IntArray(screenWidth * screenHeight)
+        // 새로 받아온 인텐트 토큰이 없으면 무부하 종료
+        if (dataIntent == null) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
-        val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
-        
-        backgroundThread = HandlerThread("AnalyzerThread").apply { start() }
-        backgroundHandler = Handler(backgroundThread!!.looper)
-        
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-        virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "Capture", screenWidth, screenHeight, metrics.densityDpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
-        )
-        
-        backgroundHandler?.post(analyzeRunnable)
-        showOverlayViews()
+        try {
+            windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val metrics = DisplayMetrics()
+            windowManager?.defaultDisplay?.getRealMetrics(metrics)
+            screenWidth = metrics.widthPixels
+            screenHeight = metrics.heightPixels
+            
+            if (pixelArray == null || pixelArray!!.size != screenWidth * screenHeight) {
+                pixelArray = IntArray(screenWidth * screenHeight)
+            }
+
+            val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            
+            // 포그라운드 서비스타입이 지정된 상태(`onCreate`)에서 안전하게 새로 매핑
+            mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
+            
+            if (backgroundThread == null) {
+                backgroundThread = HandlerThread("AnalyzerThread").apply { start() }
+                backgroundHandler = Handler(backgroundThread!!.looper)
+            }
+            
+            // 이미지리더 및 버추얼 디스플레이 완전 클린 재생성
+            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "Capture", screenWidth, screenHeight, metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
+            )
+            
+            backgroundHandler?.removeCallbacks(analyzeRunnable)
+            backgroundHandler?.post(analyzeRunnable)
+            
+            showOverlayViews()
+
+        } catch (e: Exception) {
+            Log.e(TAG, "미디어 프로젝션 초기화 대실패", e)
+            stopSelf()
+        }
 
         return START_NOT_STICKY
     }
 
-    // 💡 요구사항 반영: 더 작고 가볍게 만들어 위쪽으로 바짝 붙인 상태바 UI
+    // 💡 기존 세션을 흔적도 없이 지워버리는 청소기 함수
+    private fun stopCurrentCapture() {
+        try {
+            backgroundHandler?.removeCallbacks(analyzeRunnable)
+            virtualDisplay?.release()
+            virtualDisplay = null
+            imageReader?.close()
+            imageReader = null
+            mediaProjection?.stop()
+            mediaProjection = null
+        } catch (e: Exception) {
+            Log.e(TAG, "기존 미디어 리소스 청소 중 예외 유연하게 패스", e)
+        }
+    }
+
     private fun showOverlayViews() {
         if (overlayView == null) {
             overlayView = PatternDrawView(this)
@@ -128,7 +166,7 @@ class OverlayService : Service() {
             controlView = LinearLayout(themedContext).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(12, 6, 12, 6) // 패딩 축소 (슬림화)
+                setPadding(12, 6, 12, 6)
                 background = GradientDrawable().apply {
                     setColor(Color.parseColor("#CC111111")) 
                     cornerRadius = 12f
@@ -138,7 +176,7 @@ class OverlayService : Service() {
             val statusText = TextView(themedContext).apply {
                 text = "● 5-RD"
                 setTextColor(Color.GREEN)
-                textSize = 9f // 텍스트 크기 축소
+                textSize = 9f
                 setPadding(0, 0, 12, 0)
             }
 
@@ -147,7 +185,7 @@ class OverlayService : Service() {
                 setTextColor(Color.WHITE)
                 setBackgroundColor(Color.parseColor("#AA3333")) 
                 textSize = 9f
-                layoutParams = LinearLayout.LayoutParams(60, 50) // 버튼 미니멀화
+                layoutParams = LinearLayout.LayoutParams(60, 50)
                 setOnClickListener { stopSelf() }
             }
 
@@ -163,7 +201,7 @@ class OverlayService : Service() {
             ).apply {
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL 
                 x = 0
-                y = 75 // 💡 기존 150에서 75로 변경 (노치/상태바 영역 근처 최고 상단 배치)
+                y = 75 // 요청하신 대로 상단 바짝 밀착
             }
             windowManager?.addView(controlView, controlParams)
         }
@@ -171,13 +209,15 @@ class OverlayService : Service() {
 
     private val analyzeRunnable = object : Runnable {
         override fun run() {
-            try { processScreenParsing() } catch (e: Exception) { Log.e(TAG, "분석 오류", e) }
-            backgroundHandler?.postDelayed(this, 300) // 주기 300ms로 소폭 튜닝
+            try { processScreenParsing() } catch (e: Exception) { Log.e(TAG, "루프 에러", e) }
+            backgroundHandler?.postDelayed(this, 300) 
         }
     }
 
     private fun processScreenParsing() {
-        val image = imageReader?.acquireLatestImage() ?: return
+        // 현재 미디어프로젝션 시스템이 비활성화 상태라면 즉시 탈출하여 에러 방지
+        val reader = imageReader ?: return
+        val image = try { reader.acquireLatestImage() } catch (e: Exception) { null } ?: return
         val pixels = pixelArray ?: return
         
         try {
@@ -188,7 +228,6 @@ class OverlayService : Service() {
             val rowPadding = rowStride - pixelStride * screenWidth
             val tmpWidth = screenWidth + rowPadding / pixelStride
 
-            // 💡 안 튕기게 하는 핵심 비결: 비트맵을 매번 생성(create)하지 않고 기존 메모리 껍데기에 덮어쓰기 합니다.
             if (reusableBitmap == null || reusableBitmap!!.width != tmpWidth || reusableBitmap!!.height != screenHeight) {
                 reusableBitmap?.recycle()
                 reusableBitmap = Bitmap.createBitmap(tmpWidth, screenHeight, Bitmap.Config.ARGB_8888)
@@ -202,7 +241,6 @@ class OverlayService : Service() {
             val minX = (screenWidth * 0.04).toInt()
             val maxX = (screenWidth * 0.96).toInt()
 
-            // 색상 경계 패턴 스캔 (격자 정밀화)
             val distHistogram = IntArray(300)
             val sampleLines = 10
             val stepY = (maxY - minY) / sampleLines
@@ -256,7 +294,6 @@ class OverlayService : Service() {
 
             if (cols !in 5..10 || rows !in 5..13) return
 
-            // 동적 행렬 매핑 (1232343 구조화 단계)
             val colorGrid = Array(rows) { r ->
                 IntArray(cols) { c ->
                     val centerX = firstX + (c * cellSize) + (cellSize / 2)
@@ -267,7 +304,6 @@ class OverlayService : Service() {
                 }
             }
 
-            // 가로/세로 5개 정렬 조건 전용 스캐너 가동
             val hint = findFiveMatchMove(colorGrid, rows, cols)
             if (hint != null) {
                 val fx = (firstX + (hint.fromC * cellSize) + (cellSize / 2)).toFloat()
@@ -280,9 +316,9 @@ class OverlayService : Service() {
             }
 
         } catch (e: Throwable) {
-            Log.e(TAG, "스캔 억까 발생", e)
+            Log.e(TAG, "파싱 예외 발생", e)
         } finally {
-            image.close() // 무조건 해제하여 프레임 드랍 및 크래시 차단
+            try { image.close() } catch (e: Exception) {}
         }
     }
 
@@ -314,12 +350,9 @@ class OverlayService : Service() {
         for (r in 0 until rows) {
             for (c in 0 until cols) {
                 if (grid[r][c] == 0) continue
-                
-                // 우측 교환 조건 체크
                 if (c + 1 < cols && grid[r][c + 1] != 0 && grid[r][c] != grid[r][c + 1]) {
                     if (verifyFiveMatch(grid, r, c, r, c + 1, rows, cols)) return MatchHint(r, c, r, c + 1)
                 }
-                // 하단 교환 조건 체크
                 if (r + 1 < rows && grid[r + 1][c] != 0 && grid[r][c] != grid[r + 1][c]) {
                     if (verifyFiveMatch(grid, r, c, r + 1, c, rows, cols)) return MatchHint(r, c, r + 1, c)
                 }
@@ -363,11 +396,8 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        backgroundHandler?.removeCallbacks(analyzeRunnable)
+        stopCurrentCapture()
         backgroundThread?.quitSafely()
-        virtualDisplay?.release()
-        imageReader?.close()
-        mediaProjection?.stop()
         reusableBitmap?.recycle()
         reusableBitmap = null
         if (overlayView != null) windowManager?.removeView(overlayView)
