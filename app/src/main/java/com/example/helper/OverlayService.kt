@@ -46,8 +46,6 @@ class OverlayService : Service() {
     
     private var screenWidth = 1080
     private var screenHeight = 2400
-    private val GRID_COLS = 8
-    private val GRID_ROWS = 8
     private var reusableBitmap: Bitmap? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -142,7 +140,6 @@ class OverlayService : Service() {
             return START_NOT_STICKY
         }
 
-        // 오버레이 뷰 표출
         try {
             overlayView = PatternDrawView(this)
             val params = WindowManager.LayoutParams(
@@ -212,7 +209,7 @@ class OverlayService : Service() {
     private val analyzeRunnable = object : Runnable {
         override fun run() {
             try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "분석 에러", e) }
-            backgroundHandler?.postDelayed(this, 600)
+            backgroundHandler?.postDelayed(this, 500)
         }
     }
 
@@ -234,25 +231,115 @@ class OverlayService : Service() {
             buffer.rewind() 
             bitmap.copyPixelsFromBuffer(buffer)
 
-            var boardTop = (screenHeight * 0.28).toInt()
-            var boardBottom = (screenHeight * 0.82).toInt()
-            var boardLeft = (screenWidth * 0.03).toInt()
-            var boardRight = (screenWidth * 0.97).toInt()
+            // 💡 [단계 1] 매칭 블록들이 존재하는 유효 게임판 범위(Bounding Box) 역추적
+            var minX = screenWidth
+            var maxX = 0
+            var minY = screenHeight
+            var maxY = 0
+            var validPixelCount = 0
 
-            val boardWidth = boardRight - boardLeft
-            val blockSize = boardWidth / GRID_COLS
-            val colorGrid = Array(GRID_ROWS) { IntArray(GRID_COLS) }
+            for (y in (screenHeight * 0.22).toInt() until (screenHeight * 0.88).toInt() step 6) {
+                for (x in (screenWidth * 0.01).toInt() until (screenWidth * 0.99).toInt() step 6) {
+                    if (identifyColorSpec(bitmap.getPixel(x, y)) > 0) {
+                        if (x < minX) minX = x
+                        if (x > maxX) maxX = x
+                        if (y < minY) minY = y
+                        if (y > maxY) maxY = y
+                        validPixelCount++
+                    }
+                }
+            }
 
-            val sampleOffset = (blockSize * 0.15).toInt() 
+            // 블록이 너무 안 잡히면 인게임 화면이 아니므로 힌트 제거 후 스킵
+            if (validPixelCount < 40) {
+                overlayView?.post { overlayView?.clearHint() }
+                return
+            }
 
-            for (r in 0 until GRID_ROWS) {
-                for (c in 0 until GRID_COLS) {
-                    val pixelX = boardLeft + (c * blockSize) + (blockSize / 2)
-                    val pixelY = boardTop + (r * blockSize) + (blockSize / 2)
-                    
+            // 💡 [단계 2] 스캔 정밀 영역 재정의 및 축별 투영 프로파일링 데이터 수집
+            val padding = 20
+            val sX = maxOf(0, minX - padding)
+            val eX = minOf(screenWidth - 1, maxX + padding)
+            val sY = maxOf(0, minY - padding)
+            val eY = minOf(screenHeight - 1, maxY + padding)
+
+            val xCount = IntArray(screenWidth)
+            val yCount = IntArray(screenHeight)
+
+            for (y in sY until eY step 3) {
+                for (x in sX until eX step 3) {
+                    if (identifyColorSpec(bitmap.getPixel(x, y)) > 0) {
+                        xCount[x]++
+                        yCount[y]++
+                    }
+                }
+            }
+
+            // 💡 [단계 3] 피크 탐색 기법을 사용해 가로/세로 블록들의 실제 중심선 추출
+            val xPeaks = mutableListOf<Int>()
+            val yPeaks = mutableListOf<Int>()
+            val windowSize = 15 // 해상도별 블록 최소 탐색 간격
+
+            // 가로축 중심선 추출
+            for (x in sX + windowSize until eX - windowSize) {
+                val v = xCount[x]
+                if (v > 6) {
+                    var isPeak = true
+                    for (w in -windowSize..windowSize) {
+                        if (xCount[x + w] > v) { isPeak = false; break }
+                    }
+                    if (isPeak && (xPeaks.isEmpty() || x - xPeaks.last() > 55)) {
+                        xPeaks.add(x)
+                    }
+                }
+            }
+
+            // 세로축 중심선 추출
+            for (y in sY + windowSize until eY - windowSize) {
+                val v = yCount[y]
+                if (v > 6) {
+                    var isPeak = true
+                    for (w in -windowSize..windowSize) {
+                        if (yCount[y + w] > v) { isPeak = false; break }
+                    }
+                    if (isPeak && (yPeaks.isEmpty() || y - yPeaks.last() > 55)) {
+                        yPeaks.add(y)
+                    }
+                }
+            }
+
+            if (xPeaks.isEmpty() || yPeaks.isEmpty()) return
+
+            // 💡 [단계 4] 중심점 간격을 통해 현재 스테이지의 "실제 단일 블록 크기" 산출
+            val diffs = mutableListOf<Int>()
+            for (i in 0 until xPeaks.size - 1) { diffs.add(xPeaks[i+1] - xPeaks[i]) }
+            for (i in 0 until yPeaks.size - 1) { diffs.add(yPeaks[i+1] - yPeaks[i]) }
+            
+            // 중앙값(Median)을 취해 장애물 등으로 인한 예외 오차를 원천 차단
+            val blockSize = if (diffs.isNotEmpty()) diffs.sorted()[diffs.size / 2] else (screenWidth * 0.105).toInt()
+
+            // 💡 [단계 5] 동적 좌표를 기준으로 가변 격자 구조 매핑
+            val originX = xPeaks.minOrNull()!!
+            val originY = yPeaks.minOrNull()!!
+            
+            val maxColIdx = xPeaks.map { Math.round((it - originX).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
+            val maxRowIdx = yPeaks.map { Math.round((it - originY).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
+            
+            val numCols = maxColIdx + 1
+            val numRows = maxRowIdx + 1
+
+            val colorGrid = Array(numRows) { IntArray(numCols) }
+            val sampleOffset = (blockSize * 0.16).toInt()
+
+            // 자동 매핑된 격자들의 실제 픽셀 중심점을 정밀 샘플링
+            for (r in 0 until numRows) {
+                for (c in 0 until numCols) {
+                    val pixelX = originX + (c * blockSize)
+                    val pixelY = originY + (r * blockSize)
+
                     if (pixelX >= sampleOffset && pixelX < bitmap.width - sampleOffset &&
                         pixelY >= sampleOffset && pixelY < bitmap.height - sampleOffset) {
-                        
+
                         val points = intArrayOf(
                             bitmap.getPixel(pixelX, pixelY),
                             bitmap.getPixel(pixelX - sampleOffset, pixelY),
@@ -262,16 +349,13 @@ class OverlayService : Service() {
                         )
 
                         val scoreMap = IntArray(6)
-                        for (p in points) {
-                            scoreMap[identifyColorSpec(p)]++
-                        }
+                        for (p in points) { scoreMap[identifyColorSpec(p)]++ }
 
                         var finalColor = 0
                         var maxCount = 0
                         for (i in 1..5) {
                             if (scoreMap[i] > maxCount) {
-                                maxCount = scoreMap[i]
-                                finalColor = i
+                                maxCount = scoreMap[i]; finalColor = i
                             }
                         }
                         colorGrid[r][c] = if (maxCount >= 2) finalColor else 0
@@ -279,19 +363,20 @@ class OverlayService : Service() {
                 }
             }
 
-            val hint = findBestMatchPattern(colorGrid, GRID_ROWS, GRID_COLS)
+            // 💡 [단계 6] 최적의 매칭 패턴을 찾아내어 정확하게 자동 계산된 크기로 전달
+            val hint = findBestMatchPattern(colorGrid, numRows, numCols)
             if (hint != null) {
-                val fx = boardLeft + (hint.fromC * blockSize) + (blockSize / 2).toFloat()
-                val fy = boardTop + (hint.fromR * blockSize) + (blockSize / 2).toFloat()
-                val tx = boardLeft + (hint.toC * blockSize) + (blockSize / 2).toFloat()
-                val ty = boardTop + (hint.toR * blockSize) + (blockSize / 2).toFloat()
+                val fx = (originX + hint.fromC * blockSize).toFloat()
+                val fy = (originY + hint.fromR * blockSize).toFloat()
+                val tx = (originX + hint.toC * blockSize).toFloat()
+                val ty = (originY + hint.toR * blockSize).toFloat()
                 overlayView?.post { overlayView?.setHint(fx, fy, tx, ty, blockSize.toFloat()) }
             } else {
                 overlayView?.post { overlayView?.clearHint() }
             }
         } catch (e: Throwable) {
             Log.e(TAG, "analyzeScreenFast 실패", e)
-        } finally { // 💡 finaly -> finally 오타 수정 완료!
+        } finally {
             try { image.close() } catch (e: Exception) {}
         }
     }
@@ -303,11 +388,11 @@ class OverlayService : Service() {
         
         if (r + g + b < 90) return 0 
         return when {
-            r > 145 && g > 135 && b < 100 -> 3 
-            r > 150 && g < 95 && b < 95   -> 1 
-            b > 145 && r < 105 && g < 135 -> 2 
-            g > 115 && r < 125 && b < 125 -> 4 
-            r > 125 && b > 140 && g < 105 -> 5 
+            r > 145 && g > 135 && b < 100 -> 3 // 노란색 (왕관)
+            r > 150 && g < 95 && b < 95   -> 1 // 빨간색 (책)
+            b > 145 && r < 105 && g < 135 -> 2 // 파란색 (방패)
+            g > 115 && r < 125 && b < 125 -> 4 // 녹색 (나뭇잎)
+            r > 125 && b > 140 && g < 105 -> 5 // 보라색 (새)
             else -> 0
         }
     }
