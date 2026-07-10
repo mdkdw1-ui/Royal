@@ -48,11 +48,8 @@ class OverlayService : Service() {
     private var screenWidth = 1080
     private var screenHeight = 2400
     private var reusableBitmap: Bitmap? = null
-    
-    // 픽셀 배열 재사용 프로퍼티
     private var pixelArray: IntArray? = null
     
-    // 흔들림 방지 (Queue 기반 히스토리)
     private val gridHistory = LinkedList<Array<IntArray>>()
     private val MAX_HISTORY = 3
 
@@ -91,13 +88,14 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        return try {
-            windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-            val metrics = DisplayMetrics()
-            windowManager?.defaultDisplay?.getRealMetrics(metrics)
-            screenWidth = metrics.widthPixels
-            screenHeight = metrics.heightPixels
+        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val metrics = DisplayMetrics()
+        windowManager?.defaultDisplay?.getRealMetrics(metrics)
+        screenWidth = metrics.widthPixels
+        screenHeight = metrics.heightPixels
 
+        // 💡 [해결 책] 중복 뷰 추가 에러 차단 가드문 설정
+        if (overlayView == null) {
             overlayView = PatternDrawView(this)
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
@@ -106,18 +104,28 @@ class OverlayService : Service() {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
                 PixelFormat.TRANSLUCENT
             )
-            windowManager?.addView(overlayView, params)
-            showControlOverlay()
-
-            val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
-            val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
-            } else {
-                @Suppress("DEPRECATION")
-                intent?.getParcelableExtra<Intent>("DATA_INTENT")
+            try {
+                windowManager?.addView(overlayView, params)
+            } catch (e: Exception) {
+                Log.e(TAG, "overlayView add 실패 무시", e)
             }
-            
-            if (dataIntent != null) {
+        }
+        
+        if (controlView == null) {
+            showControlOverlay()
+        }
+
+        val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
+        val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableExtra<Intent>("DATA_INTENT")
+        }
+        
+        // 미디어 프로젝션 셋업은 권한 데이터가 들어오는 두 번째 호출 때 단 한 번만 실행되도록 격리
+        if (dataIntent != null && mediaProjection == null) {
+            try {
                 val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
                 
@@ -130,21 +138,20 @@ class OverlayService : Service() {
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
                 )
                 
-                // 버퍼 미리 할당
                 pixelArray = IntArray(screenWidth * screenHeight)
                 backgroundHandler?.post(analyzeRunnable)
-            } else {
+                Log.d(TAG, "MediaProjection 활성화 및 분석 스레드 가동 성공")
+            } catch (e: Exception) {
+                Log.e(TAG, "MediaProjection 셋업 치명적 실패", e)
                 stopSelf()
             }
-            START_NOT_STICKY
-        } catch (e: Exception) {
-            Log.e(TAG, "onStartCommand failed", e)
-            stopSelf()
-            START_NOT_STICKY
         }
+        
+        return START_NOT_STICKY
     }
 
     private fun showControlOverlay() {
+        if (controlView != null) return
         try {
             val themedContext = ContextThemeWrapper(this, androidx.appcompat.R.style.Theme_AppCompat_Light_NoActionBar)
             controlView = LinearLayout(themedContext).apply {
@@ -193,14 +200,12 @@ class OverlayService : Service() {
     private val analyzeRunnable = object : Runnable {
         override fun run() {
             try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "analyze error", e) }
-            backgroundHandler?.postDelayed(this, 500) // 대기 주기 최적화
+            backgroundHandler?.postDelayed(this, 500)
         }
     }
 
     private fun analyzeScreenFast() {
         val image = imageReader?.acquireLatestImage() ?: return
-        
-        // 💡 [컴파일 에러 해결] 스마트 캐스트 유도를 위해 로컬 상수로 변수 스냅샷 확보
         val currentPixels = pixelArray ?: IntArray(screenWidth * screenHeight).also { pixelArray = it }
         
         try {
@@ -219,10 +224,9 @@ class OverlayService : Service() {
             buffer.rewind() 
             bitmap.copyPixelsFromBuffer(buffer)
 
-            // 1. [성능 최적화] 대량 픽셀 일괄 추출 (JNI 오버헤드 1회로 단축)
+            // 스트라이드를 screenWidth로 맞춰 패딩 픽셀을 날리고 순수 알맹이만 고속 추출
             bitmap.getPixels(currentPixels, 0, screenWidth, 0, 0, screenWidth, screenHeight)
 
-            // 기기별 비율 대응 고정 탐색 스코프
             val startY = (screenHeight * 0.30).toInt()
             val endY = (screenHeight * 0.82).toInt()
             val startX = (screenWidth * 0.05).toInt()
@@ -230,7 +234,6 @@ class OverlayService : Service() {
             val baseUnit = (screenWidth * 0.11).toInt()
             val minClusterGap = (baseUnit * 0.75).toInt()
 
-            // 2. [격자 보정] 픽셀 데이터 기반 동적 중심축 산출 (클러스터링 알고리즘)
             val rawXList = mutableListOf<Int>()
             val rawYList = mutableListOf<Int>()
 
@@ -261,7 +264,6 @@ class OverlayService : Service() {
             val dynamicCols = xPeaks.size
             val dynamicRows = yPeaks.size
 
-            // 3. 동적 격자 스냅 맵핑 및 가상 행렬 빌드
             val colorGrid = Array(dynamicRows) { r ->
                 IntArray(dynamicCols) { c ->
                     val px = xPeaks[c]
@@ -270,11 +272,9 @@ class OverlayService : Service() {
                 }
             }
 
-            // 4. [흔들림 방지] 최근 3프레임 투표로 데이터 평탄화
             addToGridHistory(colorGrid, dynamicRows, dynamicCols)
             val stableGrid = getVotedStableGrid(dynamicRows, dynamicCols)
 
-            // 5. [강화된 5인라인] 가변 패턴 분석기 가동
             val hint = findFiveMatchPattern(stableGrid, dynamicRows, dynamicCols)
             
             if (hint != null) {
@@ -323,7 +323,6 @@ class OverlayService : Service() {
         return finalPeaks
     }
 
-    // 💡 [안정성] HSV 기반 컬러 분석 (그림자, 가변 광원 완전 무시)
     private fun getHsvColor(pixel: Int): Int {
         val r = Color.red(pixel)
         val g = Color.green(pixel)
@@ -336,7 +335,7 @@ class OverlayService : Service() {
         val sat = hsv[1]
         val value = hsv[2]
 
-        if (value < 0.25f || sat < 0.20f) return 0 // 무채색 및 어두운 영역 디노이즈
+        if (value < 0.25f || sat < 0.20f) return 0 
 
         return when {
             hue < 16f || hue > 345f -> 1    // 빨강
@@ -388,7 +387,6 @@ class OverlayService : Service() {
                         grid[r][c] = grid[nr][nc]
                         grid[nr][nc] = temp
 
-                        // 5개 일렬 매칭 검증
                         if (checkGridMatch5(grid, rows, cols)) {
                             return MatchHint(r, c, nr, nc)
                         }
@@ -402,14 +400,12 @@ class OverlayService : Service() {
         return null
     }
 
-    // 💡 [알고리즘 개조] 이펙트 차단 가변 길이 5-In-Row 체커
     private fun checkGridMatch5(grid: Array<IntArray>, rows: Int, cols: Int): Boolean {
         for (r in 0 until rows) {
             for (c in 0 until cols) {
                 val color = grid[r][c]
                 if (color == 0) continue
                 
-                // 가로 연속도 판정 (우측 방향)
                 if (c <= cols - 4) {
                     var matchCount = 1
                     var gapCount = 0
@@ -418,14 +414,13 @@ class OverlayService : Service() {
                         val nextColor = grid[r][c + i]
                         if (nextColor == color) {
                             matchCount++
-                        } else if (nextColor == 0 && gapCount < 2) { // 💡 최대 2칸의 이펙트 공백 허용
+                        } else if (nextColor == 0 && gapCount < 2) { 
                             gapCount++
                         } else break
                     }
                     if (matchCount >= 5) return true
                 }
 
-                // 세로 연속도 판정 (아래 방향)
                 if (r <= rows - 4) {
                     var matchCount = 1
                     var gapCount = 0
@@ -434,7 +429,7 @@ class OverlayService : Service() {
                         val nextColor = grid[r + i][c]
                         if (nextColor == color) {
                             matchCount++
-                        } else if (nextColor == 0 && gapCount < 2) { // 💡 최대 2칸의 이펙트 공백 허용
+                        } else if (nextColor == 0 && gapCount < 2) { 
                             gapCount++
                         } else break
                     }
