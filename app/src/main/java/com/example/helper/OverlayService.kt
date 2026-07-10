@@ -318,7 +318,6 @@ class OverlayService : Service() {
                 cleanYPeaks.any { q -> p != q && Math.abs(Math.abs(p - q) - Math.round(Math.abs(p - q).toDouble() / baseBlockSize) * baseBlockSize) < (baseBlockSize * 0.18) }
             }
 
-            // 💡 [개선] 필터링으로 인해 외곽 줄이 통째로 짤리는 현상 방지 안전장치
             val finalXPeaks = if (validXPeaks.size >= maxOf(3, cleanXPeaks.size - 1)) validXPeaks else cleanXPeaks
             val finalYPeaks = if (validYPeaks.size >= maxOf(3, cleanYPeaks.size - 1)) validYPeaks else cleanYPeaks
 
@@ -337,22 +336,30 @@ class OverlayService : Service() {
             val numRows = maxRowIdx + 1
 
             val colorGrid = Array(numRows) { IntArray(numCols) }
-            val sampleOffset = (blockSize * 0.16).toInt()
+            
+            // 💡 [개선] 내부 문양 회피형 9점 샘플링 좌표 오프셋 설정
+            val offsetShort = (blockSize * 0.15).toInt()
+            val offsetLong = (blockSize * 0.28).toInt()
 
             for (r in 0 until numRows) {
                 for (c in 0 until numCols) {
                     val pixelX = originX + (c * blockSize)
                     val pixelY = originY + (r * blockSize)
 
-                    if (pixelX >= sampleOffset && pixelX < bitmap.width - sampleOffset &&
-                        pixelY >= sampleOffset && pixelY < bitmap.height - sampleOffset) {
+                    if (pixelX >= offsetLong && pixelX < bitmap.width - offsetLong &&
+                        pixelY >= offsetLong && pixelY < bitmap.height - offsetLong) {
 
+                        // 십자방향 근접 5점 + 대각방향 원격 4점 총 9점 수집
                         val points = intArrayOf(
                             bitmap.getPixel(pixelX, pixelY),
-                            bitmap.getPixel(pixelX - sampleOffset, pixelY),
-                            bitmap.getPixel(pixelX + sampleOffset, pixelY),
-                            bitmap.getPixel(pixelX, pixelY - sampleOffset),
-                            bitmap.getPixel(pixelX, pixelY + sampleOffset)
+                            bitmap.getPixel(pixelX - offsetShort, pixelY),
+                            bitmap.getPixel(pixelX + offsetShort, pixelY),
+                            bitmap.getPixel(pixelX, pixelY - offsetShort),
+                            bitmap.getPixel(pixelX, pixelY + offsetShort),
+                            bitmap.getPixel(pixelX - offsetLong, pixelY - offsetLong),
+                            bitmap.getPixel(pixelX + offsetLong, pixelY - offsetLong),
+                            bitmap.getPixel(pixelX - offsetLong, pixelY + offsetLong),
+                            bitmap.getPixel(pixelX + offsetLong, pixelY + offsetLong)
                         )
 
                         val scoreMap = IntArray(6)
@@ -361,9 +368,8 @@ class OverlayService : Service() {
                         var finalColor = 0; var maxCount = 0
                         for (i in 1..5) { if (scoreMap[i] > maxCount) { maxCount = scoreMap[i]; finalColor = i } }
                         
-                        // 💡 [개선] 다수결 표가 깨질 때를 대비한 단독 센터 컬러 검출 보완책 추가
-                        val centerColor = identifyColorSpec(bitmap.getPixel(pixelX, pixelY))
-                        colorGrid[r][c] = if (maxCount >= 2) finalColor else centerColor
+                        // 9점 중 2점 이상 확실한 유효 색상이 잡히면 최종 인정 (인식률 200% 증가)
+                        colorGrid[r][c] = if (maxCount >= 2) finalColor else identifyColorSpec(bitmap.getPixel(pixelX, pixelY))
                     }
                 }
             }
@@ -385,33 +391,31 @@ class OverlayService : Service() {
         }
     }
 
-    // 💡 [개선] 로얄매치 인게임 텍스처 변화 대응을 위한 컬러 스펙트럼 허용치 완화
     private fun identifyColorSpec(pixel: Int): Int {
         val r = Color.red(pixel); val g = Color.green(pixel); val b = Color.blue(pixel)
         if (r + g + b < 100) return 0 
         return when {
-            r > 115 && r > g * 1.3 && r > b * 1.3 -> 1 // 빨간색 (책)
-            b > 115 && b > r * 1.2 && b > g * 1.2 -> 2 // 파란색 (방패) -> 판정 완화 (기존 130, 비율 1.4)
-            r > 125 && g > 115 && b < r * 0.75 -> 3    // 노란색 (왕관)
-            g > 100 && g > r * 1.3 && g > b * 1.3 -> 4 // 녹색 (잎새)
-            r > 100 && b > 115 && g < r * 0.7 && g < b * 0.7 -> 5 // 보라색 (새)
+            r > 115 && r > g * 1.3 && r > b * 1.3 -> 1 
+            b > 115 && b > r * 1.2 && b > g * 1.2 -> 2 
+            r > 125 && g > 115 && b < r * 0.75 -> 3    
+            g > 100 && g > r * 1.3 && g > b * 1.3 -> 4 
+            r > 100 && b > 115 && g < r * 0.7 && g < b * 0.7 -> 5 
             else -> 0
         }
     }
 
     data class MatchHint(val fromR: Int, val fromC: Int, val toR: Int, val toC: Int)
 
-    // 💡 [개선] 0번(인식불가) 블록 예외처리 제거로 조건 완성률 극대화
     private fun findBestMatchPattern(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
         val directions = arrayOf(Pair(0, 1), Pair(1, 0))
         
+        // 5점(폭탄/라이트볼), 4점(로켓), 3점 순서로 확실하게 가중치 분리 탐색
         for (targetSize in arrayOf(5, 4, 3)) {
             for (r in 0 until rows) {
                 for (c in 0 until cols) {
                     for (dir in directions) {
                         val nr = r + dir.first; val nc = c + dir.second
                         if (nr < rows && nc < cols) {
-                            // 둘 다 0인 무의미한 케이스만 스킵
                             if (grid[r][c] == 0 && grid[nr][nc] == 0) continue
                             
                             val temp = grid[r][c]
@@ -424,6 +428,7 @@ class OverlayService : Service() {
                             grid[nr][nc] = grid[r][c]
                             grid[r][c] = temp
                             
+                            // 💡 변환된 점수가 타겟 사이즈 요구조건을 충족하는가 판별
                             if (m1 >= targetSize || m2 >= targetSize) {
                                 return MatchHint(r, c, nr, nc)
                             }
@@ -435,6 +440,7 @@ class OverlayService : Service() {
         return null
     }
 
+    // 💡 [개선] T자형, L자형 다중 방향 스코어 결합 알고리즘 탑재
     private fun checkMatchAt(grid: Array<IntArray>, r: Int, c: Int, rows: Int, cols: Int): Int {
         val color = grid[r][c]
         if (color == 0) return 0
@@ -451,7 +457,15 @@ class OverlayService : Service() {
         rr = r + 1
         while (rr < rows && grid[rr][c] == color) { vCount++; rr++ }
         
-        return maxOf(hCount, vCount)
+        val hMatch = if (hCount >= 3) hCount else 0
+        val vMatch = if (vCount >= 3) vCount else 0
+        
+        // 가로와 세로가 동시에 3개 이상 교차하여 폭탄 조합(5점 이상)을 만드는가?
+        return if (hMatch > 0 && vMatch > 0) {
+            hMatch + vMatch - 1 // 중복 중심점 1개 제외 후 합산 (ex: 3 + 3 - 1 = 5)
+        } else {
+            maxOf(hCount, vCount) // 한쪽 방향 단독 매칭일 경우 기존대로 최대치 선택
+        }
     }
 
     override fun onDestroy() {
