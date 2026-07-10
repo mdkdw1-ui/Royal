@@ -31,7 +31,6 @@ import android.widget.TextView
 import androidx.appcompat.view.ContextThemeWrapper
 import androidx.core.app.NotificationCompat
 import kotlin.math.abs
-import kotlin.math.roundToInt
 
 class OverlayService : Service() {
     private val TAG = "OverlayService"
@@ -58,7 +57,7 @@ class OverlayService : Service() {
             createNotificationChannel()
             val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
                 .setContentTitle("로얄매치 도우미 작동 중")
-                .setContentText("가변 동적 그리드 매칭 모드 가동 중")
+                .setContentText("클러스터 정밀 5인라인 분석 중")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build()
@@ -173,8 +172,8 @@ class OverlayService : Service() {
             }
 
             val statusText = TextView(themedContext).apply {
-                text = "● DYNAMIC MATCH"
-                setTextColor(Color.CYAN)
+                text = "● TARGET 5-COMB"
+                setTextColor(Color.parseColor("#FFD700"))
                 textSize = 10f 
                 setPadding(0, 0, 12, 0)
             }
@@ -233,118 +232,67 @@ class OverlayService : Service() {
             buffer.rewind() 
             bitmap.copyPixelsFromBuffer(buffer)
 
-            var minX = screenWidth; var maxX = 0; var minY = screenHeight; var maxY = 0
-            var validPixelCount = 0
+            val baseBlockSize = (screenWidth * 0.11).toInt()
+            val minGap = (baseBlockSize * 0.75).toInt()
 
-            // 유효 영역 탐색 분할 스캔
-            val startY = (screenHeight * 0.30).toInt()
-            val endY = (screenHeight * 0.85).toInt()
-            val startX = (screenWidth * 0.05).toInt()
-            val endX = (screenWidth * 0.95).toInt()
+            // 💡 [개선 핵심] 1단계: 선 단위 누적이 아닌, 낱개 블록의 물리 독립 좌표(Centroid) 추출
+            val rawXPeaks = mutableListOf<Int>()
+            val rawYPeaks = mutableListOf<Int>()
 
-            for (y in startY until endY step 6) {
-                for (x in startX until endX step 6) {
-                    if (identifyColorSpec(bitmap.getPixel(x, y)) > 0) {
-                        if (x < minX) minX = x; if (x > maxX) maxX = x
-                        if (y < minY) minY = y; if (y > maxY) maxY = y
-                        validPixelCount++
-                    }
+            val startY = (screenHeight * 0.32).toInt()
+            val endY = (screenHeight * 0.82).toInt()
+            val startX = (screenWidth * 0.06).toInt()
+            val endX = (screenWidth * 0.94).toInt()
+
+            // 가로축 대표 샘플링 스캔
+            for (x in startX until endX step 4) {
+                var matchCount = 0
+                for (y in startY until endY step 15) {
+                    if (identifyColorSpec(bitmap.getPixel(x, y)) > 0) matchCount++
                 }
+                if (matchCount > 4) rawXPeaks.add(x)
             }
 
-            if (validPixelCount < 40) {
+            // 세로축 대표 샘플링 스캔
+            for (y in startY until endY step 4) {
+                var matchCount = 0
+                for (x in startX until endX step 15) {
+                    if (identifyColorSpec(bitmap.getPixel(x, y)) > 0) matchCount++
+                }
+                if (matchCount > 4) rawYPeaks.add(y)
+            }
+
+            // 근접한 좌표 집합들을 그룹화하여 정중앙 축 1개로 압축 (클러스터 필터링)
+            val xPeaks = clusterPeaks(rawXPeaks, minGap)
+            val yPeaks = clusterPeaks(rawYPeaks, minGap)
+
+            if (xPeaks.size < 3 || yPeaks.size < 3) {
                 overlayView?.post { overlayView?.clearHint() }
                 return
             }
 
-            val padding = 10
-            val sX = maxOf(0, minX - padding); val eX = minOf(screenWidth - 1, maxX + padding)
-            val sY = maxOf(0, minY - padding); val eY = minOf(screenHeight - 1, maxY + padding)
+            val numCols = xPeaks.size
+            val numRows = yPeaks.size
 
-            val xCount = IntArray(screenWidth)
-            val yCount = IntArray(screenHeight)
-
-            for (y in sY until eY step 3) {
-                for (x in sX until eX step 3) {
-                    if (identifyColorSpec(bitmap.getPixel(x, y)) > 0) {
-                        xCount[x]++; yCount[y]++
-                    }
-                }
-            }
-
-            // 💡 [개선 핵심] 동적 픽셀 중심축 탐색 알고리즘 (가변 판 구조 대응)
-            val xPeaks = mutableListOf<Int>()
-            val yPeaks = mutableListOf<Int>()
-            val approxBlockSize = (screenWidth * 0.11).toInt()
-
-            var inPeak = false
-            var peakStart = 0
-            for (x in sX until eX) {
-                if (xCount[x] > 4) {
-                    if (!inPeak) { peakStart = x; inPeak = true }
-                } else {
-                    if (inPeak) {
-                        val center = (peakStart + x - 1) / 2
-                        if (xPeaks.isEmpty() || center - xPeaks.last() > approxBlockSize * 0.7) xPeaks.add(center)
-                        inPeak = false
-                    }
-                }
-            }
-
-            inPeak = false
-            for (y in sY until eY) {
-                if (yCount[y] > 4) {
-                    if (!inPeak) { peakStart = y; inPeak = true }
-                } else {
-                    if (inPeak) {
-                        val center = (peakStart + y - 1) / 2
-                        if (yPeaks.isEmpty() || center - yPeaks.last() > approxBlockSize * 0.7) yPeaks.add(center)
-                        inPeak = false
-                    }
-                }
-            }
-
-            if (xPeaks.isEmpty() || yPeaks.isEmpty()) return
-
-            // 중심 축들 간의 중간 격자 간격(blockSize) 동적 계산
-            val gaps = mutableListOf<Int>()
-            for (i in 0 until xPeaks.size - 1) gaps.add(xPeaks[i+1] - xPeaks[i])
-            for (i in 0 until yPeaks.size - 1) gaps.add(yPeaks[i+1] - yPeaks[i])
-            val blockSize = if (gaps.isNotEmpty()) gaps.sorted()[gaps.size / 2] else approxBlockSize
-
-            val originX = xPeaks.minOrNull()!!
-            val originY = yPeaks.minOrNull()!!
-
-            // 유동적인 가로/세로 전체 인덱스 칸 수 계산
-            val numCols = (((maxX - originX).toDouble() / blockSize).roundToInt() + 1).coerceAtLeast(1)
-            val numRows = (((maxY - originY).toDouble() / blockSize).roundToInt() + 1).coerceAtLeast(1)
-
-            // 가변 유동 그리드 생성 및 실제 물리 중심점 맵핑
-            val colToX = IntArray(numCols) { originX + (it * blockSize) }
-            val rowToY = IntArray(numRows) { originY + (it * blockSize) }
-
+            // 💡 [개선 핵심] 2단계: 유동적으로 쪼개진 비대칭 격자에 정확히 동적 인덱스 부여
             val colorGrid = Array(numRows) { IntArray(numCols) }
-            val offsetShort = (blockSize * 0.15).toInt()
-            val offsetLong = (blockSize * 0.28).toInt()
+            val sampleRadius = (baseBlockSize * 0.15).toInt()
 
             for (r in 0 until numRows) {
                 for (c in 0 until numCols) {
-                    val pixelX = colToX[c]
-                    val pixelY = rowToY[r]
+                    val pixelX = xPeaks[c]
+                    val pixelY = yPeaks[r]
 
-                    if (pixelX >= offsetLong && pixelX < bitmap.width - offsetLong &&
-                        pixelY >= offsetLong && pixelY < bitmap.height - offsetLong) {
+                    if (pixelX in sampleRadius until bitmap.width - sampleRadius &&
+                        pixelY in sampleRadius until bitmap.height - sampleRadius) {
 
+                        // 블록 중심점 내부 5개 스팟 정밀 멀티 서칭
                         val points = intArrayOf(
                             bitmap.getPixel(pixelX, pixelY),
-                            bitmap.getPixel(pixelX - offsetShort, pixelY),
-                            bitmap.getPixel(pixelX + offsetShort, pixelY),
-                            bitmap.getPixel(pixelX, pixelY - offsetShort),
-                            bitmap.getPixel(pixelX, pixelY + offsetShort),
-                            bitmap.getPixel(pixelX - offsetLong, pixelY - offsetLong),
-                            bitmap.getPixel(pixelX + offsetLong, pixelY - offsetLong),
-                            bitmap.getPixel(pixelX - offsetLong, pixelY + offsetLong),
-                            bitmap.getPixel(pixelX + offsetLong, pixelY + offsetLong)
+                            bitmap.getPixel(pixelX - sampleRadius, pixelY),
+                            bitmap.getPixel(pixelX + sampleRadius, pixelY),
+                            bitmap.getPixel(pixelX, pixelY - sampleRadius),
+                            bitmap.getPixel(pixelX, pixelY + sampleRadius)
                         )
 
                         val scoreMap = IntArray(6)
@@ -353,18 +301,20 @@ class OverlayService : Service() {
                         var finalColor = 0; var maxCount = 0
                         for (i in 1..5) { if (scoreMap[i] > maxCount) { maxCount = scoreMap[i]; finalColor = i } }
                         
-                        colorGrid[r][c] = if (maxCount >= 2) finalColor else identifyColorSpec(bitmap.getPixel(pixelX, pixelY))
+                        // 확실한 매칭 결과가 없으면 빈 공간(0) 취급
+                        colorGrid[r][c] = if (maxCount >= 2) finalColor else 0
                     }
                 }
             }
 
+            // 3단계: 가변 배열 패턴 분석 및 최적화된 힌트 출력
             val hint = findBestMatchPattern(colorGrid, numRows, numCols)
             if (hint != null) {
-                val fx = colToX[hint.fromC].toFloat()
-                val fy = rowToY[hint.fromR].toFloat()
-                val tx = colToX[hint.toC].toFloat()
-                val ty = rowToY[hint.toR].toFloat()
-                overlayView?.post { overlayView?.setHint(fx, fy, tx, ty, blockSize.toFloat()) }
+                val fx = xPeaks[hint.fromC].toFloat()
+                val fy = yPeaks[hint.fromR].toFloat()
+                val tx = xPeaks[hint.toC].toFloat()
+                val ty = yPeaks[hint.toR].toFloat()
+                overlayView?.post { overlayView?.setHint(fx, fy, tx, ty, baseBlockSize.toFloat()) }
             } else {
                 overlayView?.post { overlayView?.clearHint() }
             }
@@ -375,15 +325,45 @@ class OverlayService : Service() {
         }
     }
 
+    // 인접 픽셀 좌표 스크럼을 짜서 정중앙 센터값 하나만 추출하는 헬퍼 함수
+    private fun clusterPeaks(peaks: List<Int>, minGap: Int): List<Int> {
+        if (peaks.isEmpty()) return emptyList()
+        val clustered = mutableListOf<Int>()
+        var currentCluster = mutableListOf<Int>()
+        
+        currentCluster.add(peaks[0])
+        for (i in 1 until peaks.size) {
+            if (peaks[i] - peaks[i - 1] <= 12) { // 연속된 선 픽셀들 묶기
+                currentCluster.add(peaks[i])
+            } else {
+                clustered.add(currentCluster.sum() / currentCluster.size)
+                currentCluster = mutableListOf()
+                currentCluster.add(peaks[i])
+            }
+        }
+        if (currentCluster.isNotEmpty()) {
+            clustered.add(currentCluster.sum() / currentCluster.size)
+        }
+
+        // 너무 촘촘하게 붙은 가짜 피크(노이즈) 2차 제거
+        val finalPeaks = mutableListOf<Int>()
+        for (p in clustered) {
+            if (finalPeaks.isEmpty() || p - finalPeaks.last() >= minGap) {
+                finalPeaks.add(p)
+            }
+        }
+        return finalPeaks
+    }
+
     private fun identifyColorSpec(pixel: Int): Int {
         val r = Color.red(pixel); val g = Color.green(pixel); val b = Color.blue(pixel)
-        if (r + g + b < 100) return 0 
+        if (r + g + b < 90) return 0 
         return when {
-            r > 120 && r > g * 1.3 && r > b * 1.3 -> 1 // 빨강
-            b > 120 && b > r * 1.2 && b > g * 1.2 -> 2 // 파랑
-            r > 130 && g > 115 && b < r * 0.75 -> 3    // 노랑
-            g > 105 && g > r * 1.3 && g > b * 1.3 -> 4 // 초록
-            r > 105 && b > 120 && g < r * 0.7 && g < b * 0.7 -> 5 // 보라
+            r > 125 && r > g * 1.35 && r > b * 1.35 -> 1 // 빨강 (타겟)
+            b > 125 && b > r * 1.25 && b > g * 1.25 -> 2 // 파랑
+            r > 135 && g > 120 && b < r * 0.70 -> 3    // 노랑
+            g > 110 && g > r * 1.35 && g > b * 1.35 -> 4 // 초록
+            r > 110 && b > 125 && g < r * 0.65 && g < b * 0.65 -> 5 // 보라
             else -> 0
         }
     }
@@ -398,6 +378,7 @@ class OverlayService : Service() {
                 for (dir in directions) {
                     val nr = r + dir.first; val nc = c + dir.second
                     if (nr < rows && nc < cols) {
+                        // 둘 다 공백 칸(격자 외부 혹은 특수 장애물)이면 연산 스킵
                         if (grid[r][c] == 0 && grid[nr][nc] == 0) continue
                         
                         val temp = grid[r][c]
@@ -420,11 +401,12 @@ class OverlayService : Service() {
         return null
     }
 
+    // 💡 [개선 핵심] 가변 빈 공간(0) 예외 차단형 5개 스트레이트 매칭 판정 알고리즘
     private fun checkStrict5InRow(grid: Array<IntArray>, r: Int, c: Int, rows: Int, cols: Int): Boolean {
         val color = grid[r][c]
         if (color == 0) return false
         
-        // 가로 탐색 (문양/이펙트 공백 1칸 유연 보정)
+        // 가로 연속성 체크 (문양 간섭으로 인한 누락은 1칸만 보정 허용)
         var hCount = 1
         var hGap = 0
         var cc = c - 1
@@ -445,7 +427,7 @@ class OverlayService : Service() {
         }
         if (hCount >= 5) return true
 
-        // 세로 탐색 (문양/이펙트 공백 1칸 유연 보정)
+        // 세로 연속성 체크
         var vCount = 1
         var vGap = 0
         var rr = r - 1
