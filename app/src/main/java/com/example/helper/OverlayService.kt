@@ -56,7 +56,7 @@ class OverlayService : Service() {
             createNotificationChannel()
             val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
                 .setContentTitle("로얄매치 도우미 작동 중")
-                .setContentText("5인라인 콤보 집중 분석 중입니다.")
+                .setContentText("정밀 5인라인 스캔 모드 가동 중")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build()
@@ -171,8 +171,8 @@ class OverlayService : Service() {
             }
 
             val statusText = TextView(themedContext).apply {
-                text = "● 5-LINE ONLY"
-                setTextColor(Color.CYAN)
+                text = "● 5-LINE MATCH"
+                setTextColor(Color.YELLOW)
                 textSize = 10f 
                 setPadding(0, 0, 12, 0)
             }
@@ -209,7 +209,7 @@ class OverlayService : Service() {
     private val analyzeRunnable = object : Runnable {
         override fun run() {
             try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "분석 에러", e) }
-            backgroundHandler?.postDelayed(this, 400)
+            backgroundHandler?.postDelayed(this, 350)
         }
     }
 
@@ -264,88 +264,64 @@ class OverlayService : Service() {
                 }
             }
 
+            val baseBlockSize = (screenWidth * 0.105).toInt()
             val xPeaks = mutableListOf<Int>()
             val yPeaks = mutableListOf<Int>()
-            val windowSize = 15 
-
-            for (x in sX + windowSize until eX - windowSize) {
-                val v = xCount[x]
-                if (v > 6) {
-                    var isPeak = true
-                    for (w in -windowSize..windowSize) { if (xCount[x + w] > v) { isPeak = false; break } }
-                    if (isPeak && (xPeaks.isEmpty() || x - xPeaks.last() > 55)) xPeaks.add(x)
+            
+            // 💡 [개선] 경계선 오류를 타파하는 세그먼트 스캔 방식 (블록 중심점 정밀 포착)
+            var inPeak = false
+            var peakStart = 0
+            for (x in sX until eX) {
+                if (xCount[x] > 4) {
+                    if (!inPeak) { peakStart = x; inPeak = true }
+                } else {
+                    if (inPeak) {
+                        val center = (peakStart + x - 1) / 2
+                        if (xPeaks.isEmpty() || center - xPeaks.last() > baseBlockSize * 0.75) xPeaks.add(center)
+                        inPeak = false
+                    }
                 }
             }
 
-            for (y in sY + windowSize until eY - windowSize) {
-                val v = yCount[y]
-                if (v > 6) {
-                    var isPeak = true
-                    for (w in -windowSize..windowSize) { if (yCount[y + w] > v) { isPeak = false; break } }
-                    if (isPeak && (yPeaks.isEmpty() || y - yPeaks.last() > 55)) yPeaks.add(y)
+            inPeak = false
+            for (y in sY until eY) {
+                if (yCount[y] > 4) {
+                    if (!inPeak) { peakStart = y; inPeak = true }
+                } else {
+                    if (inPeak) {
+                        val center = (peakStart + y - 1) / 2
+                        if (yPeaks.isEmpty() || center - yPeaks.last() > baseBlockSize * 0.75) yPeaks.add(center)
+                        inPeak = false
+                    }
                 }
             }
 
             if (xPeaks.isEmpty() || yPeaks.isEmpty()) return
 
-            val diffs = mutableListOf<Int>()
-            for (i in 0 until xPeaks.size - 1) { diffs.add(xPeaks[i+1] - xPeaks[i]) }
-            for (i in 0 until yPeaks.size - 1) { diffs.add(yPeaks[i+1] - yPeaks[i]) }
-            val baseBlockSize = if (diffs.isNotEmpty()) diffs.sorted()[diffs.size / 2] else (screenWidth * 0.105).toInt()
-
-            val cleanXPeaks = mutableListOf<Int>()
-            if (xPeaks.size >= 2 && (xPeaks[1] - xPeaks[0]) < baseBlockSize * 0.7) {
-                cleanXPeaks.addAll(xPeaks.subList(1, xPeaks.size))
-            } else { cleanXPeaks.addAll(xPeaks) }
-            if (cleanXPeaks.size >= 2 && (cleanXPeaks.last() - cleanXPeaks[cleanXPeaks.size - 2]) < baseBlockSize * 0.7) {
-                cleanXPeaks.removeAt(cleanXPeaks.size - 1)
-            }
-
-            val cleanYPeaks = mutableListOf<Int>()
-            if (yPeaks.size >= 2 && (yPeaks[1] - yPeaks[0]) < baseBlockSize * 0.7) {
-                cleanYPeaks.addAll(yPeaks.subList(1, yPeaks.size)) 
-            } else { cleanYPeaks.addAll(yPeaks) }
-            if (cleanYPeaks.size >= 2 && (cleanYPeaks.last() - cleanYPeaks[cleanYPeaks.size - 2]) < baseBlockSize * 0.7) {
-                cleanYPeaks.removeAt(cleanYPeaks.size - 1)
-            }
-
-            if (cleanXPeaks.isEmpty() || cleanYPeaks.isEmpty()) return
-
-            val validXPeaks = cleanXPeaks.filter { p ->
-                cleanXPeaks.any { q -> p != q && Math.abs(Math.abs(p - q) - Math.round(Math.abs(p - q).toDouble() / baseBlockSize) * baseBlockSize) < (baseBlockSize * 0.18) }
-            }
-            val validYPeaks = cleanYPeaks.filter { p ->
-                cleanYPeaks.any { q -> p != q && Math.abs(Math.abs(p - q) - Math.round(Math.abs(p - q).toDouble() / baseBlockSize) * baseBlockSize) < (baseBlockSize * 0.18) }
-            }
-
-            val finalXPeaks = if (validXPeaks.size >= maxOf(3, cleanXPeaks.size - 1)) validXPeaks else cleanXPeaks
-            val finalYPeaks = if (validYPeaks.size >= maxOf(3, cleanYPeaks.size - 1)) validYPeaks else cleanYPeaks
-
-            val originX = finalXPeaks.minOrNull()!!
-            val originY = finalYPeaks.minOrNull()!!
+            val originX = xPeaks.minOrNull()!!
+            val originY = yPeaks.minOrNull()!!
             
             val finalDiffs = mutableListOf<Int>()
-            for (i in 0 until finalXPeaks.size - 1) { finalDiffs.add(finalXPeaks[i+1] - finalXPeaks[i]) }
-            for (i in 0 until finalYPeaks.size - 1) { finalDiffs.add(finalYPeaks[i+1] - finalYPeaks[i]) }
+            for (i in 0 until xPeaks.size - 1) { finalDiffs.add(xPeaks[i+1] - xPeaks[i]) }
+            for (i in 0 until yPeaks.size - 1) { finalDiffs.add(yPeaks[i+1] - yPeaks[i]) }
             val blockSize = if (finalDiffs.isNotEmpty()) finalDiffs.sorted()[finalDiffs.size / 2] else baseBlockSize
 
-            val maxColIdx = finalXPeaks.map { Math.round((it - originX).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
-            val maxRowIdx = finalYPeaks.map { Math.round((it - originY).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
+            val maxColIdx = xPeaks.map { Math.round((it - originX).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
+            val maxRowIdx = yPeaks.map { Math.round((it - originY).toDouble() / blockSize).toInt() }.maxOrNull() ?: 0
             
             val numCols = maxColIdx + 1
             val numRows = maxRowIdx + 1
 
-            // 💡 [개선] 픽셀 오차 축적 방지를 위한 스냅 좌표 매핑 생성
             val colToX = IntArray(numCols) { originX + (it * blockSize) }
-            for (peak in finalXPeaks) {
-                val c = Math.round((peak - originX).toDouble() / blockSize).toInt()
-                if (c in 0 until numCols) colToX[c] = peak
+            for (p in xPeaks) {
+                val c = Math.round((p - originX).toDouble() / blockSize).toInt()
+                if (c in 0 until numCols) colToX[c] = p
             }
 
             val rowToY = IntArray(numRows) { originY + (it * blockSize) }
-            for (peak in finalYPeaks) {
-                val r = Math.round((peak - originY).toDouble() / blockSize).toInt()
-                if (r in 0 until numRows) rowToY[r] = peak
+            for (p in yPeaks) {
+                val r = Math.round((p - originY).toDouble() / blockSize).toInt()
+                if (r in 0 until numRows) rowToY[r] = p
             }
 
             val colorGrid = Array(numRows) { IntArray(numCols) }
@@ -385,7 +361,6 @@ class OverlayService : Service() {
 
             val hint = findBestMatchPattern(colorGrid, numRows, numCols)
             if (hint != null) {
-                // 💡 실제 감지된 피크 좌표 중심점 그대로 매핑하여 완벽히 정중앙에 선 안착시킴
                 val fx = colToX[hint.fromC].toFloat()
                 val fy = rowToY[hint.fromR].toFloat()
                 val tx = colToX[hint.toC].toFloat()
@@ -430,7 +405,6 @@ class OverlayService : Service() {
                         grid[r][c] = grid[nr][nc]
                         grid[nr][nc] = temp
                         
-                        // 스왑 후 생성되는 매칭 탐색
                         val is5InRow1 = checkStrict5InRow(grid, r, c, rows, cols)
                         val is5InRow2 = checkStrict5InRow(grid, nr, nc, rows, cols)
                         
@@ -447,27 +421,52 @@ class OverlayService : Service() {
         return null
     }
 
-    // 💡 [개선] T자, L자 탈락시키고 순수 가로/세로 5개 한 줄 정렬만 체크하는 로직
+    // 💡 [개선] 이펙트/문양 간섭으로 인한 미인식 공백(0)을 1개까지 유연하게 메워 5매칭 성공률 극대화
     private fun checkStrict5InRow(grid: Array<IntArray>, r: Int, c: Int, rows: Int, cols: Int): Boolean {
         val color = grid[r][c]
         if (color == 0) return false
         
-        // 가로 직선 연속성 체크
+        // 가로 스캔 (미인식 보정 적용)
         var hCount = 1
+        var hZeros = 0
         var cc = c - 1
-        while (cc >= 0 && grid[r][cc] == color) { hCount++; cc-- }
+        while (cc >= 0) {
+            if (grid[r][cc] == color) { hCount++ }
+            else if (grid[r][cc] == 0 && hZeros == 0) {
+                if (cc - 1 >= 0 && grid[r][cc - 1] == color) { hCount++; hZeros++ } else break
+            } else break
+            cc--
+        }
         cc = c + 1
-        while (cc < cols && grid[r][cc] == color) { hCount++; cc++ }
-        
-        // 세로 직선 연속성 체크
+        while (cc < cols) {
+            if (grid[r][cc] == color) { hCount++ }
+            else if (grid[r][cc] == 0 && hZeros == 0) {
+                if (cc + 1 < cols && grid[r][cc + 1] == color) { hCount++; hZeros++ } else break
+            } else break
+            cc++
+        }
+        if (hCount >= 5) return true
+
+        // 세로 스캔 (미인식 보정 적용)
         var vCount = 1
+        var vZeros = 0
         var rr = r - 1
-        while (rr >= 0 && grid[rr][c] == color) { vCount++; rr-- }
+        while (rr >= 0) {
+            if (grid[rr][c] == color) { vCount++ }
+            else if (grid[rr][c] == 0 && vZeros == 0) {
+                if (rr - 1 >= 0 && grid[rr - 1][c] == color) { vCount++; vZeros++ } else break
+            } else break
+            rr--
+        }
         rr = r + 1
-        while (rr < rows && grid[rr][c] == color) { vCount++; rr++ }
-        
-        // 가로나 세로 한 줄이 정확히 5개 이상 뻗어나갈 때만 true 반환
-        return hCount >= 5 || vCount >= 5
+        while (rr < rows) {
+            if (grid[rr][c] == color) { vCount++ }
+            else if (grid[rr][c] == 0 && vZeros == 0) {
+                if (rr + 1 < rows && grid[rr + 1][c] == color) { vCount++; vZeros++ } else break
+            } else break
+            rr++
+        }
+        return vCount >= 5
     }
 
     override fun onDestroy() {
