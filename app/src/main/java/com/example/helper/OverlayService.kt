@@ -30,7 +30,6 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.view.ContextThemeWrapper
 import androidx.core.app.NotificationCompat
-import java.util.LinkedList
 
 class OverlayService : Service() {
     private val TAG = "OverlayHelper"
@@ -48,6 +47,9 @@ class OverlayService : Service() {
     private var screenWidth = 1080
     private var screenHeight = 2400
     private var pixelArray: IntArray? = null
+    
+    // 💡 안 튕기게 하기 위한 핵심: 가비지 컬렉터(GC) 폭발 방지용 비트맵 재사용 객체
+    private var reusableBitmap: Bitmap? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -55,7 +57,7 @@ class OverlayService : Service() {
         super.onCreate()
         createNotificationChannel()
         val notification = NotificationCompat.Builder(this, "helper_channel")
-            .setContentTitle("5라인 매칭 헬퍼 작동 중")
+            .setContentTitle("5라인 미러볼 헬퍼 작동 중")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
@@ -108,6 +110,7 @@ class OverlayService : Service() {
         return START_NOT_STICKY
     }
 
+    // 💡 요구사항 반영: 더 작고 가볍게 만들어 위쪽으로 바짝 붙인 상태바 UI
     private fun showOverlayViews() {
         if (overlayView == null) {
             overlayView = PatternDrawView(this)
@@ -119,12 +122,57 @@ class OverlayService : Service() {
             )
             windowManager?.addView(overlayView, params)
         }
+
+        if (controlView == null) {
+            val themedContext = ContextThemeWrapper(this, androidx.appcompat.R.style.Theme_AppCompat_Light_NoActionBar)
+            controlView = LinearLayout(themedContext).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(12, 6, 12, 6) // 패딩 축소 (슬림화)
+                background = GradientDrawable().apply {
+                    setColor(Color.parseColor("#CC111111")) 
+                    cornerRadius = 12f
+                }
+            }
+
+            val statusText = TextView(themedContext).apply {
+                text = "● 5-RD"
+                setTextColor(Color.GREEN)
+                textSize = 9f // 텍스트 크기 축소
+                setPadding(0, 0, 12, 0)
+            }
+
+            val stopButton = Button(themedContext).apply {
+                text = "X"
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#AA3333")) 
+                textSize = 9f
+                layoutParams = LinearLayout.LayoutParams(60, 50) // 버튼 미니멀화
+                setOnClickListener { stopSelf() }
+            }
+
+            controlView?.addView(statusText)
+            controlView?.addView(stopButton)
+
+            val controlParams = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL 
+                x = 0
+                y = 75 // 💡 기존 150에서 75로 변경 (노치/상태바 영역 근처 최고 상단 배치)
+            }
+            windowManager?.addView(controlView, controlParams)
+        }
     }
 
     private val analyzeRunnable = object : Runnable {
         override fun run() {
             try { processScreenParsing() } catch (e: Exception) { Log.e(TAG, "분석 오류", e) }
-            backgroundHandler?.postDelayed(this, 350) 
+            backgroundHandler?.postDelayed(this, 300) // 주기 300ms로 소폭 튜닝
         }
     }
 
@@ -140,21 +188,23 @@ class OverlayService : Service() {
             val rowPadding = rowStride - pixelStride * screenWidth
             val tmpWidth = screenWidth + rowPadding / pixelStride
 
-            val bmp = Bitmap.createBitmap(tmpWidth, screenHeight, Bitmap.Config.ARGB_8888)
-            bmp.copyPixelsFromBuffer(buffer)
-            // 비트맵 최적화: getPixels로 전체 화면 배열을 한 번에 추출
-            bmp.getPixels(pixels, 0, screenWidth, 0, 0, screenWidth, screenHeight)
-            bmp.recycle()
+            // 💡 안 튕기게 하는 핵심 비결: 비트맵을 매번 생성(create)하지 않고 기존 메모리 껍데기에 덮어쓰기 합니다.
+            if (reusableBitmap == null || reusableBitmap!!.width != tmpWidth || reusableBitmap!!.height != screenHeight) {
+                reusableBitmap?.recycle()
+                reusableBitmap = Bitmap.createBitmap(tmpWidth, screenHeight, Bitmap.Config.ARGB_8888)
+            }
+            
+            reusableBitmap!!.copyPixelsFromBuffer(buffer)
+            reusableBitmap!!.getPixels(pixels, 0, screenWidth, 0, 0, screenWidth, screenHeight)
 
-            // 1단계: 분석 영역 설정 (상단 UI 및 하단 아이템 바 제외 중앙부)
-            val minY = (screenHeight * 0.25).toInt()
-            val maxY = (screenHeight * 0.85).toInt()
-            val minX = (screenWidth * 0.02).toInt()
-            val maxX = (screenWidth * 0.98).toInt()
+            val minY = (screenHeight * 0.28).toInt()
+            val maxY = (screenHeight * 0.82).toInt()
+            val minX = (screenWidth * 0.04).toInt()
+            val maxX = (screenWidth * 0.96).toInt()
 
-            // 2단계: 색상 변화 간격을 통한 정확한 [1칸 격자 크기] 추출 (히스토그램 방식)
+            // 색상 경계 패턴 스캔 (격자 정밀화)
             val distHistogram = IntArray(300)
-            val sampleLines = 8
+            val sampleLines = 10
             val stepY = (maxY - minY) / sampleLines
             
             for (i in 0 until sampleLines) {
@@ -166,7 +216,7 @@ class OverlayService : Service() {
                     if (color != prevColor) {
                         if (lastX != -1) {
                             val diff = x - lastX
-                            if (diff in 95..195) distHistogram[diff]++ // 일반적인 1칸 크기 유효 범위
+                            if (diff in 90..200) distHistogram[diff]++
                         }
                         lastX = x
                         prevColor = color
@@ -174,26 +224,22 @@ class OverlayService : Service() {
                 }
             }
 
-            // 히스토그램에서 가장 빈도수가 높은 픽셀 거리를 격자 크기로 확정
             var cellSize = 0
             var maxVotes = 0
-            for (d in 100..190) {
+            for (d in 95..195) {
                 val votes = distHistogram[d - 1] + distHistogram[d] + distHistogram[d + 1]
                 if (votes > maxVotes) {
                     maxVotes = votes
                     cellSize = d
                 }
             }
-            if (cellSize == 0) cellSize = screenWidth / 8 // 탐색 실패시 기본값 보정
+            if (cellSize == 0) cellSize = screenWidth / 8
 
-            // 3단계: 화면 안에서 실제 블록이 존재하는 절대 경계 영역(Bounding Box) 역산
-            var firstX = maxX
-            var lastX = minX
-            var firstY = maxY
-            var lastY = minY
+            var firstX = maxX; var lastX = minX
+            var firstY = maxY; var lastY = minY
             
-            for (y in minY..maxY step 15) {
-                for (x in minX..maxX step 15) {
+            for (y in minY..maxY step 20) {
+                for (x in minX..maxX step 20) {
                     if (getHsvColor(pixels[y * screenWidth + x]) in 1..5) {
                         if (x < firstX) firstX = x
                         if (x > lastX) lastX = x
@@ -208,9 +254,9 @@ class OverlayService : Service() {
             val cols = (totalW + cellSize / 2) / cellSize
             val rows = (totalH + cellSize / 2) / cellSize
 
-            if (cols !in 4..11 || rows !in 4..14) return
+            if (cols !in 5..10 || rows !in 5..13) return
 
-            // 4단계: 동적 그리드 행렬(2D Array) 생성 및 픽셀 파싱
+            // 동적 행렬 매핑 (1232343 구조화 단계)
             val colorGrid = Array(rows) { r ->
                 IntArray(cols) { c ->
                     val centerX = firstX + (c * cellSize) + (cellSize / 2)
@@ -221,7 +267,7 @@ class OverlayService : Service() {
                 }
             }
 
-            // 5단계: 분석된 2D 구조를 바탕으로 가로/세로 5개 매칭 가능 무브 탐색
+            // 가로/세로 5개 정렬 조건 전용 스캐너 가동
             val hint = findFiveMatchMove(colorGrid, rows, cols)
             if (hint != null) {
                 val fx = (firstX + (hint.fromC * cellSize) + (cellSize / 2)).toFloat()
@@ -234,18 +280,17 @@ class OverlayService : Service() {
             }
 
         } catch (e: Throwable) {
-            Log.e(TAG, "Parsing fail", e)
+            Log.e(TAG, "스캔 억까 발생", e)
         } finally {
-            image.close()
+            image.close() // 무조건 해제하여 프레임 드랍 및 크래시 차단
         }
     }
 
-    // HSV 기반 정밀 색상 스캐너 (그림자/하이라이트 방어용)
     private fun getHsvColor(pixel: Int): Int {
         val r = Color.red(pixel)
         val g = Color.green(pixel)
         val b = Color.blue(pixel)
-        if (r + g + b < 90 || r + g + b > 720) return 0 // 너무 어둡거나 밝은 무채색 패스
+        if (r + g + b < 100 || r + g + b > 710) return 0 
 
         val hsv = FloatArray(3)
         Color.RGBToHSV(r, g, b, hsv)
@@ -253,29 +298,28 @@ class OverlayService : Service() {
         val sat = hsv[1]
         val valF = hsv[2]
 
-        if (sat < 0.22f || valF < 0.22f) return 0
+        if (sat < 0.20f || valF < 0.20f) return 0
 
         return when {
-            (hue >= 345f || hue <= 15f) -> 1   // 빨강 (책)
-            (hue in 195f..245f) -> 2           // 파랑 (방패)
-            (hue in 38f..65f) -> 3             // 노랑 (왕관)
-            (hue in 90f..150f) -> 4            // 초록 (나뭇잎)
-            (hue in 265f..330f) -> 5           // 보라 (새/특수 분홍 타일)
+            (hue >= 345f || hue <= 15f) -> 1   // 빨강
+            (hue in 195f..245f) -> 2           // 파랑
+            (hue in 40f..65f) -> 3             // 노랑
+            (hue in 90f..145f) -> 4            // 초록
+            (hue in 265f..330f) -> 5           // 보라
             else -> 0
         }
     }
 
-    // 가로/세로 5줄 연속 매칭 탐색기
     private fun findFiveMatchMove(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
         for (r in 0 until rows) {
             for (c in 0 until cols) {
                 if (grid[r][c] == 0) continue
                 
-                // 1. 오른쪽 스왑 검사
+                // 우측 교환 조건 체크
                 if (c + 1 < cols && grid[r][c + 1] != 0 && grid[r][c] != grid[r][c + 1]) {
                     if (verifyFiveMatch(grid, r, c, r, c + 1, rows, cols)) return MatchHint(r, c, r, c + 1)
                 }
-                // 2. 아래쪽 스왑 검사
+                // 하단 교환 조건 체크
                 if (r + 1 < rows && grid[r + 1][c] != 0 && grid[r][c] != grid[r + 1][c]) {
                     if (verifyFiveMatch(grid, r, c, r + 1, c, rows, cols)) return MatchHint(r, c, r + 1, c)
                 }
@@ -284,25 +328,22 @@ class OverlayService : Service() {
         return null
     }
 
-    // 실제로 5개가 일렬로 배치되는지 가상 스왑 후 검증
     private fun verifyFiveMatch(grid: Array<IntArray>, r1: Int, c1: Int, r2: Int, c2: Int, rows: Int, cols: Int): Boolean {
         val temp = grid[r1][c1]
         grid[r1][c1] = grid[r2][c2]
         grid[r2][c2] = temp
 
-        val success = isLineOfFive(grid, r1, c1, rows, cols) || isLineOfFive(grid, r2, c2, rows, cols)
+        val isFive = isLineOfFive(grid, r1, c1, rows, cols) || isLineOfFive(grid, r2, c2, rows, cols)
 
-        // 원상 복구
         grid[r2][c2] = grid[r1][c1]
         grid[r1][c1] = temp
-        return success
+        return isFive
     }
 
     private fun isLineOfFive(grid: Array<IntArray>, r: Int, c: Int, rows: Int, cols: Int): Boolean {
         val color = grid[r][c]
         if (color == 0) return false
 
-        // 가로 연속성 체크
         var hCount = 1
         var cc = c - 1
         while (cc >= 0 && grid[r][cc] == color) { hCount++; cc-- }
@@ -310,7 +351,6 @@ class OverlayService : Service() {
         while (cc < cols && grid[r][cc] == color) { hCount++; cc++ }
         if (hCount >= 5) return true
 
-        // 세로 연속성 체크
         var vCount = 1
         var rr = r - 1
         while (rr >= 0 && grid[rr][c] == color) { vCount++; rr-- }
@@ -328,7 +368,10 @@ class OverlayService : Service() {
         virtualDisplay?.release()
         imageReader?.close()
         mediaProjection?.stop()
+        reusableBitmap?.recycle()
+        reusableBitmap = null
         if (overlayView != null) windowManager?.removeView(overlayView)
+        if (controlView != null) windowManager?.removeView(controlView)
     }
 
     data class MatchHint(val fromR: Int, val fromC: Int, val toR: Int, val toC: Int)
