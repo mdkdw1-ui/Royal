@@ -157,14 +157,13 @@ class OverlayService : Service() {
         return START_NOT_STICKY
     }
 
-    // 💡 [개선] 사용중(RUNNING) 표시창 크기를 최소화하고 상단으로 이동 시킴
     private fun showControlOverlay() {
         try {
             val themedContext = ContextThemeWrapper(this, androidx.appcompat.R.style.Theme_AppCompat_Light_NoActionBar)
             controlView = LinearLayout(themedContext).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(15, 8, 15, 8) // 패딩 대폭 축소 (기존 30, 15)
+                setPadding(15, 8, 15, 8) 
                 background = GradientDrawable().apply {
                     setColor(Color.parseColor("#AA000000")) 
                     cornerRadius = 15f
@@ -174,7 +173,7 @@ class OverlayService : Service() {
             val statusText = TextView(themedContext).apply {
                 text = "● RUNNING"
                 setTextColor(Color.GREEN)
-                textSize = 10f // 폰트 축소 (기존 12f)
+                textSize = 10f 
                 setPadding(0, 0, 12, 0)
             }
 
@@ -182,7 +181,7 @@ class OverlayService : Service() {
                 text = "STOP"
                 setTextColor(Color.WHITE)
                 setBackgroundColor(Color.parseColor("#FF3B30")) 
-                textSize = 9f // 버튼 폰트 축소 (기존 11f)
+                textSize = 9f 
                 setPadding(10, 5, 10, 5)
                 setOnClickListener { stopSelf() }
             }
@@ -199,7 +198,7 @@ class OverlayService : Service() {
             ).apply {
                 gravity = Gravity.TOP or Gravity.END 
                 x = 20
-                y = 70 // 화면 최상단 상태바 밑으로 포지션 이동 (기존 150)
+                y = 70 
             }
             windowManager?.addView(controlView, controlParams)
         } catch (e: Exception) {
@@ -289,13 +288,11 @@ class OverlayService : Service() {
 
             if (xPeaks.isEmpty() || yPeaks.isEmpty()) return
 
-            // 1차 임시 블록 사이즈 도출
             val diffs = mutableListOf<Int>()
             for (i in 0 until xPeaks.size - 1) { diffs.add(xPeaks[i+1] - xPeaks[i]) }
             for (i in 0 until yPeaks.size - 1) { diffs.add(yPeaks[i+1] - yPeaks[i]) }
             val baseBlockSize = if (diffs.isNotEmpty()) diffs.sorted()[diffs.size / 2] else (screenWidth * 0.105).toInt()
 
-            // 💡 [개선] 노란색 황금 보드 테두리 선(Frame Line) 강제 여과 기능 추가
             val cleanXPeaks = mutableListOf<Int>()
             if (xPeaks.size >= 2 && (xPeaks[1] - xPeaks[0]) < baseBlockSize * 0.7) {
                 cleanXPeaks.addAll(xPeaks.subList(1, xPeaks.size))
@@ -306,7 +303,7 @@ class OverlayService : Service() {
 
             val cleanYPeaks = mutableListOf<Int>()
             if (yPeaks.size >= 2 && (yPeaks[1] - yPeaks[0]) < baseBlockSize * 0.7) {
-                cleanYPeaks.addAll(yPeaks.subList(1, yPeaks.size)) // 테두리 가짜 피크 탈락
+                cleanYPeaks.addAll(yPeaks.subList(1, yPeaks.size)) 
             } else { cleanYPeaks.addAll(yPeaks) }
             if (cleanYPeaks.size >= 2 && (cleanYPeaks.last() - cleanYPeaks[cleanYPeaks.size - 2]) < baseBlockSize * 0.7) {
                 cleanYPeaks.removeAt(cleanYPeaks.size - 1)
@@ -314,7 +311,6 @@ class OverlayService : Service() {
 
             if (cleanXPeaks.isEmpty() || cleanYPeaks.isEmpty()) return
 
-            // 격자 자석 스냅 필터링 재실행
             val validXPeaks = cleanXPeaks.filter { p ->
                 cleanXPeaks.any { q -> p != q && Math.abs(Math.abs(p - q) - Math.round(Math.abs(p - q).toDouble() / baseBlockSize) * baseBlockSize) < (baseBlockSize * 0.18) }
             }
@@ -322,10 +318,10 @@ class OverlayService : Service() {
                 cleanYPeaks.any { q -> p != q && Math.abs(Math.abs(p - q) - Math.round(Math.abs(p - q).toDouble() / baseBlockSize) * baseBlockSize) < (baseBlockSize * 0.18) }
             }
 
-            val finalXPeaks = if (validXPeaks.isNotEmpty()) validXPeaks else cleanXPeaks
-            val finalYPeaks = if (validYPeaks.isNotEmpty()) validYPeaks else cleanYPeaks
+            // 💡 [개선] 필터링으로 인해 외곽 줄이 통째로 짤리는 현상 방지 안전장치
+            val finalXPeaks = if (validXPeaks.size >= maxOf(3, cleanXPeaks.size - 1)) validXPeaks else cleanXPeaks
+            val finalYPeaks = if (validYPeaks.size >= maxOf(3, cleanYPeaks.size - 1)) validYPeaks else cleanYPeaks
 
-            // 보드판 테두리가 완벽히 제거된 최종 리얼 오리진 좌표 산출
             val originX = finalXPeaks.minOrNull()!!
             val originY = finalYPeaks.minOrNull()!!
             
@@ -364,7 +360,10 @@ class OverlayService : Service() {
 
                         var finalColor = 0; var maxCount = 0
                         for (i in 1..5) { if (scoreMap[i] > maxCount) { maxCount = scoreMap[i]; finalColor = i } }
-                        colorGrid[r][c] = if (maxCount >= 2) finalColor else 0
+                        
+                        // 💡 [개선] 다수결 표가 깨질 때를 대비한 단독 센터 컬러 검출 보완책 추가
+                        val centerColor = identifyColorSpec(bitmap.getPixel(pixelX, pixelY))
+                        colorGrid[r][c] = if (maxCount >= 2) finalColor else centerColor
                     }
                 }
             }
@@ -386,32 +385,34 @@ class OverlayService : Service() {
         }
     }
 
+    // 💡 [개선] 로얄매치 인게임 텍스처 변화 대응을 위한 컬러 스펙트럼 허용치 완화
     private fun identifyColorSpec(pixel: Int): Int {
         val r = Color.red(pixel); val g = Color.green(pixel); val b = Color.blue(pixel)
         if (r + g + b < 100) return 0 
         return when {
-            r > 130 && r > g * 1.4 && r > b * 1.4 -> 1 // 빨간색 (책)
-            b > 130 && b > r * 1.4 && b > g * 1.4 -> 2 // 파란색 (방패)
-            r > 140 && g > 130 && b < r * 0.6 && Math.abs(r - g) < 40 -> 3 // 노란색 (왕관/매칭템)
-            g > 110 && g > r * 1.4 && g > b * 1.4 -> 4 // 녹색 (잎새)
-            r > 120 && b > 130 && g < r * 0.6 && g < b * 0.6 -> 5 // 보라색 (새)
+            r > 115 && r > g * 1.3 && r > b * 1.3 -> 1 // 빨간색 (책)
+            b > 115 && b > r * 1.2 && b > g * 1.2 -> 2 // 파란색 (방패) -> 판정 완화 (기존 130, 비율 1.4)
+            r > 125 && g > 115 && b < r * 0.75 -> 3    // 노란색 (왕관)
+            g > 100 && g > r * 1.3 && g > b * 1.3 -> 4 // 녹색 (잎새)
+            r > 100 && b > 115 && g < r * 0.7 && g < b * 0.7 -> 5 // 보라색 (새)
             else -> 0
         }
     }
 
     data class MatchHint(val fromR: Int, val fromC: Int, val toR: Int, val toC: Int)
 
+    // 💡 [개선] 0번(인식불가) 블록 예외처리 제거로 조건 완성률 극대화
     private fun findBestMatchPattern(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
         val directions = arrayOf(Pair(0, 1), Pair(1, 0))
         
-        // 5개 매칭(특수 블록 무조건 생성 조합)을 최우선 순위로 강제 탐색하도록 순서 고정
         for (targetSize in arrayOf(5, 4, 3)) {
             for (r in 0 until rows) {
                 for (c in 0 until cols) {
-                    if (grid[r][c] == 0) continue
                     for (dir in directions) {
                         val nr = r + dir.first; val nc = c + dir.second
-                        if (nr < rows && nc < cols && grid[nr][nc] != 0) {
+                        if (nr < rows && nc < cols) {
+                            // 둘 다 0인 무의미한 케이스만 스킵
+                            if (grid[r][c] == 0 && grid[nr][nc] == 0) continue
                             
                             val temp = grid[r][c]
                             grid[r][c] = grid[nr][nc]
