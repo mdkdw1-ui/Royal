@@ -54,7 +54,6 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "OverlayService onCreate 호출됨")
         try {
             createNotificationChannel()
             val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
@@ -69,7 +68,6 @@ class OverlayService : Service() {
             } else {
                 startForeground(1, notification)
             }
-            Log.d(TAG, "Foreground 서비스 승격 성공")
         } catch (e: Exception) {
             Log.e(TAG, "onCreate 단계에서 포그라운드 승격 실패", e)
             stopSelf()
@@ -88,8 +86,6 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "OverlayService onStartCommand 호출됨")
-        
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
         val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
@@ -99,7 +95,6 @@ class OverlayService : Service() {
         }
         
         if (dataIntent == null) {
-            Log.e(TAG, "dataIntent가 누락되어 서비스를 종료합니다.")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -113,33 +108,26 @@ class OverlayService : Service() {
 
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
-            Log.d(TAG, "mediaProjection 객체 획득 성공")
             
             backgroundThread = HandlerThread("ScreenCaptureThread").apply { start() }
             backgroundHandler = Handler(backgroundThread!!.looper)
 
-            // 💡 [안드로이드 14 핵심 해결책] createVirtualDisplay 호출 전에 반드시 콜백을 등록해야 에러가 안 납니다!
             mediaProjection?.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
                     super.onStop()
-                    Log.d(TAG, "MediaProjection이 시스템에 의해 중지되었습니다.")
                     stopSelf()
                 }
             }, backgroundHandler)
-            Log.d(TAG, "MediaProjection 필수 콜백 등록 완료")
 
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
             
-            // 콜백이 등록되었으므로 여기서 더 이상 크래시가 나지 않고 정상 통과합니다.
             virtualDisplay = mediaProjection?.createVirtualDisplay(
                 "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
             )
-            Log.d(TAG, "VirtualDisplay 가상 디스플레이 연결 완벽 성공!")
             
             backgroundHandler?.post(analyzeRunnable)
 
-            // 💡 연결이 완벽히 성공했으므로 안심하고 MainActivity에 신호를 보냅니다.
             val finishIntent = Intent(this, MainActivity::class.java).apply {
                 action = Intent.ACTION_MAIN
                 addCategory(Intent.CATEGORY_LAUNCHER)
@@ -149,12 +137,12 @@ class OverlayService : Service() {
             startActivity(finishIntent)
 
         } catch (e: Exception) {
-            Log.e(TAG, "미디어 프로젝션 연동 실패!! 크래시 로그 확인 필요", e)
+            Log.e(TAG, "미디어 프로젝션 연동 실패", e)
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // 오버레이 뷰 드로잉
+        // 오버레이 뷰 표출
         try {
             overlayView = PatternDrawView(this)
             val params = WindowManager.LayoutParams(
@@ -167,7 +155,7 @@ class OverlayService : Service() {
             windowManager?.addView(overlayView, params)
             showControlOverlay()
         } catch (e: Exception) {
-            Log.e(TAG, "오버레이 그리기 실패", e)
+            Log.e(TAG, "오버레이 생성 실패", e)
         }
 
         return START_NOT_STICKY
@@ -224,7 +212,7 @@ class OverlayService : Service() {
     private val analyzeRunnable = object : Runnable {
         override fun run() {
             try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "분석 에러", e) }
-            backgroundHandler?.postDelayed(this, 800)
+            backgroundHandler?.postDelayed(this, 600) // 분석 주기를 0.6초로 조금 더 기민하게 변경
         }
     }
 
@@ -246,55 +234,57 @@ class OverlayService : Service() {
             buffer.rewind() 
             bitmap.copyPixelsFromBuffer(buffer)
 
-            var boardTop = 0
-            var boardBottom = 0
-            var boardLeft = 0
-            var boardRight = 0
-            val centerX = screenWidth / 2
-            val startY = (screenHeight * 0.25).toInt()
-            val endY = (screenHeight * 0.80).toInt()
-
-            for (y in startY..endY) {
-                val pixel = bitmap.getPixel(centerX, y)
-                if (Color.red(pixel) in 30..95 && Color.green(pixel) in 25..85 && Color.blue(pixel) in 20..80) {
-                    if (boardTop == 0) boardTop = y
-                    boardBottom = y
-                }
-            }
-
-            if (boardTop == 0 || boardBottom == 0 || (boardBottom - boardTop) < 300) {
-                boardTop = (screenHeight * 0.35).toInt()
-                boardBottom = (screenHeight * 0.75).toInt()
-            }
-
-            val targetMidY = boardTop + (boardBottom - boardTop) / 2
-            for (x in (screenWidth * 0.02).toInt() until centerX) {
-                if (Color.red(bitmap.getPixel(x, targetMidY)) in 30..95) { boardLeft = x; break }
-            }
-            for (x in (screenWidth * 0.98).toInt() downTo centerX) {
-                if (Color.red(bitmap.getPixel(x, targetMidY)) in 30..95) { boardRight = x; break }
-            }
-
-            if (boardLeft == 0 || boardRight == 0 || (boardRight - boardLeft) < 500) {
-                boardLeft = (screenWidth * 0.05).toInt()
-                boardRight = (screenWidth * 0.95).toInt()
-            }
+            // 변형 격자 맵 대응을 위한 보정용 감지 패널 범위 설정
+            var boardTop = (screenHeight * 0.28).toInt()
+            var boardBottom = (screenHeight * 0.82).toInt()
+            var boardLeft = (screenWidth * 0.03).toInt()
+            var boardRight = (screenWidth * 0.97).toInt()
 
             val boardWidth = boardRight - boardLeft
             val blockSize = boardWidth / GRID_COLS
             val colorGrid = Array(GRID_ROWS) { IntArray(GRID_COLS) }
 
+            // 💡 [개선] 십자형 다중 포인트 샘플링을 통한 오탐 방지 및 격자 틀어짐 방어
+            val sampleOffset = (blockSize * 0.15).toInt() 
+
             for (r in 0 until GRID_ROWS) {
                 for (c in 0 until GRID_COLS) {
                     val pixelX = boardLeft + (c * blockSize) + (blockSize / 2)
                     val pixelY = boardTop + (r * blockSize) + (blockSize / 2)
-                    if (pixelX >= 0 && pixelX < bitmap.width && pixelY >= 0 && pixelY < bitmap.height) {
-                        colorGrid[r][c] = identifyColorSpec(bitmap.getPixel(pixelX, pixelY))
+                    
+                    if (pixelX >= sampleOffset && pixelX < bitmap.width - sampleOffset &&
+                        pixelY >= sampleOffset && pixelY < bitmap.height - sampleOffset) {
+                        
+                        // 중심점 및 상하좌우 4포인트 추가 대조
+                        val points = intArrayOf(
+                            bitmap.getPixel(pixelX, pixelY),
+                            bitmap.getPixel(pixelX - sampleOffset, pixelY),
+                            bitmap.getPixel(pixelX + sampleOffset, pixelY),
+                            bitmap.getPixel(pixelX, pixelY - sampleOffset),
+                            bitmap.getPixel(pixelX, pixelY + sampleOffset)
+                        )
+
+                        val scoreMap = IntArray(6)
+                        for (p in points) {
+                            scoreMap[identifyColorSpec(p)]++
+                        }
+
+                        // 빈 공간(0)을 제외하고 가장 많이 검출된 색상 스펙을 최종 선택
+                        var finalColor = 0
+                        var maxCount = 0
+                        for (i in 1..5) {
+                            if (scoreMap[i] > maxCount) {
+                                maxCount = scoreMap[i]
+                                finalColor = i
+                            }
+                        }
+                        colorGrid[r][c] = if (maxCount >= 2) finalColor else 0
                     }
                 }
             }
 
-            val hint = findFiveMatchPattern(colorGrid, GRID_ROWS, GRID_COLS)
+            // 💡 [핵심 개선] 5매칭 -> 4매칭 -> 3매칭 순으로 유연하게 서칭하도록 로직 전환
+            val hint = findBestMatchPattern(colorGrid, GRID_ROWS, GRID_COLS)
             if (hint != null) {
                 val fx = boardLeft + (hint.fromC * blockSize) + (blockSize / 2).toFloat()
                 val fy = boardTop + (hint.fromR * blockSize) + (blockSize / 2).toFloat()
@@ -306,43 +296,55 @@ class OverlayService : Service() {
             }
         } catch (e: Throwable) {
             Log.e(TAG, "analyzeScreenFast 실패", e)
-        } finally {
+        } finaly {
             try { image.close() } catch (e: Exception) {}
         }
     }
 
+    // 로얄매치 주요 블록 색상 범위 정밀 고도화
     private fun identifyColorSpec(pixel: Int): Int {
         val r = Color.red(pixel)
         val g = Color.green(pixel)
         val b = Color.blue(pixel)
-        if (r + g + b < 100) return 0 
+        
+        if (r + g + b < 90) return 0 
         return when {
-            r > 150 && g > 140 && b < 130 -> 3
-            r > 140 && g < 90 && b < 90   -> 1
-            b > 140 && r < 100 && g < 130 -> 2
-            g > 130 && r < 100 && b < 100 -> 4
-            r > 130 && b > 140 && g < 100 -> 5
+            r > 145 && g > 135 && b < 100 -> 3 // 노란색 (왕관)
+            r > 150 && g < 95 && b < 95   -> 1 // 빨간색 (책)
+            b > 145 && r < 105 && g < 135 -> 2 // 파란색 (방패)
+            g > 115 && r < 125 && b < 125 -> 4 // 녹색 (나뭇잎 - 유연하게 범위 확장)
+            r > 125 && b > 140 && g < 105 -> 5 // 보라색 (새)
             else -> 0
         }
     }
 
     data class MatchHint(val fromR: Int, val fromC: Int, val toR: Int, val toC: Int)
 
-    private fun findFiveMatchPattern(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
+    // 💡 [알고리즘 업그레이드] 다중 타겟 매칭 서처
+    private fun findBestMatchPattern(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
         val directions = arrayOf(Pair(0, 1), Pair(1, 0))
-        for (r in 0 until rows) {
-            for (c in 0 until cols) {
-                if (grid[r][c] == 0) continue
-                for (dir in directions) {
-                    val nr = r + dir.first
-                    val nc = c + dir.second
-                    if (nr < rows && nc < cols && grid[nr][nc] != 0) {
-                        val temp = grid[r][c]
-                        grid[r][c] = grid[nr][nc]
-                        grid[nr][nc] = temp
-                        if (checkGridMatch5(grid, rows, cols)) return MatchHint(r, c, nr, nc)
-                        grid[nr][nc] = grid[r][c]
-                        grid[r][c] = temp
+        
+        // 5매칭 우선 탐색 -> 없으면 4매칭 -> 없으면 3매칭 순으로 역순 스캔 실행
+        for (targetSize in arrayOf(5, 4, 3)) {
+            for (r in 0 until rows) {
+                for (c in 0 until cols) {
+                    if (grid[r][c] == 0) continue
+                    for (dir in directions) {
+                        val nr = r + dir.first
+                        val nc = c + dir.second
+                        if (nr < rows && nc < cols && grid[nr][nc] != 0) {
+                            // 임시 스와이프 변경
+                            val temp = grid[r][c]
+                            grid[r][c] = grid[nr][nc]
+                            grid[nr][nc] = temp
+                            
+                            if (checkGridMatchSize(grid, rows, cols, targetSize)) {
+                                return MatchHint(r, c, nr, nc)
+                            }
+                            // 원복
+                            grid[nr][nc] = grid[r][c]
+                            grid[r][c] = temp
+                        }
                     }
                 }
             }
@@ -350,17 +352,29 @@ class OverlayService : Service() {
         return null
     }
 
-    private fun checkGridMatch5(grid: Array<IntArray>, rows: Int, cols: Int): Boolean {
+    private fun checkGridMatchSize(grid: Array<IntArray>, rows: Int, cols: Int, size: Int): Boolean {
+        // 가로축 검사
         for (r in 0 until rows) {
-            for (c in 0..cols - 5) {
+            for (c in 0..cols - size) {
                 val color = grid[r][c]
-                if (color != 0 && color == grid[r][c+1] && color == grid[r][c+2] && color == grid[r][c+3] && color == grid[r][c+4]) return true
+                if (color == 0) continue
+                var isMatch = true
+                for (i in 1 until size) {
+                    if (grid[r][c + i] != color) { isMatch = false; break }
+                }
+                if (isMatch) return true
             }
         }
+        // 세로축 검사
         for (c in 0 until cols) {
-            for (r in 0..rows - 5) {
+            for (r in 0..rows - size) {
                 val color = grid[r][c]
-                if (color != 0 && color == grid[r+1][c] && color == grid[r+2][c] && color == grid[r+3][c] && color == grid[r+4][c]) return true
+                if (color == 0) continue
+                var isMatch = true
+                for (i in 1 until size) {
+                    if (grid[r + i][c] != color) { isMatch = false; break }
+                }
+                if (isMatch) return true
             }
         }
         return false
@@ -379,7 +393,7 @@ class OverlayService : Service() {
             if (overlayView != null) windowManager?.removeView(overlayView)
             if (controlView != null) windowManager?.removeView(controlView)
         } catch (e: Exception) {
-            Log.e(TAG, "onDestroy 실패", e)
+            Log.e(TAG, "onDestroy 에러", e)
         }
     }
 }
