@@ -31,8 +31,6 @@ import android.widget.TextView
 import androidx.appcompat.view.ContextThemeWrapper
 import androidx.core.app.NotificationCompat
 import java.util.LinkedList
-import kotlin.math.max
-import kotlin.math.min
 
 class OverlayService : Service() {
     private val TAG = "OverlayService"
@@ -49,14 +47,14 @@ class OverlayService : Service() {
     
     private var screenWidth = 1080
     private var screenHeight = 2400
-    private val GRID_COLS = 8
-    private val GRID_ROWS = 8
     private var reusableBitmap: Bitmap? = null
-    private var pixelArray: IntArray? = null  // 픽셀 배열 재사용
+    
+    // 픽셀 배열 재사용 프로퍼티
+    private var pixelArray: IntArray? = null
     
     // 흔들림 방지 (Queue 기반 히스토리)
     private val gridHistory = LinkedList<Array<IntArray>>()
-    private val MAX_HISTORY = 5
+    private val MAX_HISTORY = 3
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -66,7 +64,7 @@ class OverlayService : Service() {
             createNotificationChannel()
             val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
                 .setContentTitle("로얄매치 도우미 작동 중")
-                .setContentText("백그라운드 스레드에서 초고속으로 매칭 패턴을 분석 중입니다.")
+                .setContentText("고성능 HSV 기반 탐색 알고리즘 구동 중")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .build()
 
@@ -100,7 +98,6 @@ class OverlayService : Service() {
             screenWidth = metrics.widthPixels
             screenHeight = metrics.heightPixels
 
-            // 1. 투명 힌트 가이드 라인 뷰 생성
             overlayView = PatternDrawView(this)
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
@@ -109,17 +106,10 @@ class OverlayService : Service() {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
                 PixelFormat.TRANSLUCENT
             )
-            try { 
-                windowManager?.addView(overlayView, params) 
-            } catch (e: Exception) { 
-                Log.e(TAG, "Failed to add overlay view", e)
-            }
-
-            // 2. 실행 상태 표시기 + 킬 스위치 생성 (위쪽, 작은 사이즈)
+            windowManager?.addView(overlayView, params)
             showControlOverlay()
 
             val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
-            
             val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
             } else {
@@ -140,13 +130,10 @@ class OverlayService : Service() {
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
                 )
                 
-                // 픽셀 배열 사전 할당
+                // 버퍼 미리 할당
                 pixelArray = IntArray(screenWidth * screenHeight)
-                
                 backgroundHandler?.post(analyzeRunnable)
-                Log.d(TAG, "Service started successfully")
             } else {
-                Log.e(TAG, "dataIntent is null")
                 stopSelf()
             }
             START_NOT_STICKY
@@ -160,7 +147,6 @@ class OverlayService : Service() {
     private fun showControlOverlay() {
         try {
             val themedContext = ContextThemeWrapper(this, androidx.appcompat.R.style.Theme_AppCompat_Light_NoActionBar)
-            
             controlView = LinearLayout(themedContext).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -170,25 +156,20 @@ class OverlayService : Service() {
                     cornerRadius = 15f
                 }
             }
-
             val statusText = TextView(themedContext).apply {
-                text = "● RUNNING"
-                setTextColor(Color.GREEN)
+                text = "● HSV SMART RUN"
+                setTextColor(Color.CYAN)
                 textSize = 10f
                 setPadding(0, 0, 15, 0)
             }
-
             val stopButton = Button(themedContext).apply {
                 text = "STOP"
                 setTextColor(Color.WHITE)
                 setBackgroundColor(Color.parseColor("#FF3B30")) 
                 textSize = 9f
                 setPadding(8, 4, 8, 4)
-                setOnClickListener {
-                    stopSelf() 
-                }
+                setOnClickListener { stopSelf() }
             }
-
             controlView?.addView(statusText)
             controlView?.addView(stopButton)
 
@@ -201,14 +182,9 @@ class OverlayService : Service() {
             ).apply {
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
                 x = 0
-                y = 30  // 화면 위쪽으로 더 이동
+                y = 30
             }
-
-            try {
-                windowManager?.addView(controlView, controlParams)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to add control view", e)
-            }
+            windowManager?.addView(controlView, controlParams)
         } catch (e: Exception) {
             Log.e(TAG, "showControlOverlay failed", e)
         }
@@ -216,24 +192,23 @@ class OverlayService : Service() {
 
     private val analyzeRunnable = object : Runnable {
         override fun run() {
-            try {
-                analyzeScreenFast()
-            } catch (e: Exception) {
-                Log.e(TAG, "analyzeScreenFast error", e)
-            }
-            backgroundHandler?.postDelayed(this, 800)
+            try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "analyze error", e) }
+            backgroundHandler?.postDelayed(this, 500) // 대기 주기 최적화
         }
     }
 
     private fun analyzeScreenFast() {
         val image = imageReader?.acquireLatestImage() ?: return
+        
+        // 💡 [컴파일 에러 해결] 스마트 캐스트 유도를 위해 로컬 상수로 변수 스냅샷 확보
+        val currentPixels = pixelArray ?: IntArray(screenWidth * screenHeight).also { pixelArray = it }
+        
         try {
             val planes = image.planes
             val buffer = planes[0].buffer          
             val pixelStride = planes[0].pixelStride  
             val rowStride = planes[0].rowStride      
             val rowPadding = rowStride - pixelStride * screenWidth
-
             val adjustedWidth = screenWidth + rowPadding / pixelStride
 
             if (reusableBitmap == null || reusableBitmap!!.width != adjustedWidth || reusableBitmap!!.height != screenHeight) {
@@ -244,214 +219,159 @@ class OverlayService : Service() {
             buffer.rewind() 
             bitmap.copyPixelsFromBuffer(buffer)
 
-            // 픽셀 배열에 한 번에 복사 (JNI 호출 1회만)
-            if (pixelArray == null || pixelArray!!.size != screenWidth * screenHeight) {
-                pixelArray = IntArray(screenWidth * screenHeight)
+            // 1. [성능 최적화] 대량 픽셀 일괄 추출 (JNI 오버헤드 1회로 단축)
+            bitmap.getPixels(currentPixels, 0, screenWidth, 0, 0, screenWidth, screenHeight)
+
+            // 기기별 비율 대응 고정 탐색 스코프
+            val startY = (screenHeight * 0.30).toInt()
+            val endY = (screenHeight * 0.82).toInt()
+            val startX = (screenWidth * 0.05).toInt()
+            val endX = (screenWidth * 0.95).toInt()
+            val baseUnit = (screenWidth * 0.11).toInt()
+            val minClusterGap = (baseUnit * 0.75).toInt()
+
+            // 2. [격자 보정] 픽셀 데이터 기반 동적 중심축 산출 (클러스터링 알고리즘)
+            val rawXList = mutableListOf<Int>()
+            val rawYList = mutableListOf<Int>()
+
+            for (x in startX until endX step 5) {
+                var validCount = 0
+                for (y in startY until endY step 15) {
+                    if (getHsvColor(currentPixels[y * screenWidth + x]) > 0) validCount++
+                }
+                if (validCount > 4) rawXList.add(x)
             }
-            bitmap.getPixels(pixelArray, 0, screenWidth, 0, 0, screenWidth, screenHeight)
 
-            // 동적 그리드 감지
-            val boardBounds = detectDynamicGrid(pixelArray!!)
-            val boardTop = boardBounds.top
-            val boardBottom = boardBounds.bottom
-            val boardLeft = boardBounds.left
-            val boardRight = boardBounds.right
+            for (y in startY until endY step 5) {
+                var validCount = 0
+                for (x in startX until endX step 15) {
+                    if (getHsvColor(currentPixels[y * screenWidth + x]) > 0) validCount++
+                }
+                if (validCount > 4) rawYList.add(y)
+            }
 
-            val boardWidth = boardRight - boardLeft
-            val blockSize = boardWidth / GRID_COLS
-            val colorGrid = Array(GRID_ROWS) { IntArray(GRID_COLS) }
+            val xPeaks = processClusterPeaks(rawXList, minClusterGap)
+            val yPeaks = processClusterPeaks(rawYList, minClusterGap)
 
-            // 블록 색상 추출 (HSV 기반)
-            for (r in 0 until GRID_ROWS) {
-                for (c in 0 until GRID_COLS) {
-                    val pixelX = boardLeft + (c * blockSize) + (blockSize / 2)
-                    val pixelY = boardTop + (r * blockSize) + (blockSize / 2)
-                    
-                    if (pixelX >= 0 && pixelX < screenWidth && pixelY >= 0 && pixelY < screenHeight) {
-                        val pixelIndex = pixelY * screenWidth + pixelX
-                        val pixel = pixelArray!![pixelIndex]
-                        colorGrid[r][c] = getHsvColor(pixel)
-                    }
+            if (xPeaks.size < 3 || yPeaks.size < 3) {
+                overlayView?.post { overlayView?.clearHint() }
+                return
+            }
+
+            val dynamicCols = xPeaks.size
+            val dynamicRows = yPeaks.size
+
+            // 3. 동적 격자 스냅 맵핑 및 가상 행렬 빌드
+            val colorGrid = Array(dynamicRows) { r ->
+                IntArray(dynamicCols) { c ->
+                    val px = xPeaks[c]
+                    val py = yPeaks[r]
+                    getHsvColor(currentPixels[py * screenWidth + px])
                 }
             }
 
-            // 흔들림 방지: 그리드 히스토리에 추가
-            addToGridHistory(colorGrid)
-            val stableGrid = stableGrid()
+            // 4. [흔들림 방지] 최근 3프레임 투표로 데이터 평탄화
+            addToGridHistory(colorGrid, dynamicRows, dynamicCols)
+            val stableGrid = getVotedStableGrid(dynamicRows, dynamicCols)
 
-            // 5개 연속 매칭 패턴 찾기 (강화된 로직)
-            val hint = findFiveMatchPattern(stableGrid, GRID_ROWS, GRID_COLS)
+            // 5. [강화된 5인라인] 가변 패턴 분석기 가동
+            val hint = findFiveMatchPattern(stableGrid, dynamicRows, dynamicCols)
             
             if (hint != null) {
-                val fx = boardLeft + (hint.fromC * blockSize) + (blockSize / 2).toFloat()
-                val fy = boardTop + (hint.fromR * blockSize) + (blockSize / 2).toFloat()
-                val tx = boardLeft + (hint.toC * blockSize) + (blockSize / 2).toFloat()
-                val ty = boardTop + (hint.toR * blockSize) + (blockSize / 2).toFloat()
+                val fx = xPeaks[hint.fromC].toFloat()
+                val fy = yPeaks[hint.fromR].toFloat()
+                val tx = xPeaks[hint.toC].toFloat()
+                val ty = yPeaks[hint.toR].toFloat()
                 
-                Log.d(TAG, "Match found: (${hint.fromR},${hint.fromC}) -> (${hint.toR},${hint.toC})")
                 overlayView?.post {
-                    overlayView?.setHint(fx, fy, tx, ty, blockSize.toFloat())
+                    overlayView?.setHint(fx, fy, tx, ty, baseUnit.toFloat())
                 }
             } else {
-                overlayView?.post {
-                    overlayView?.clearHint()
-                }
+                overlayView?.post { overlayView?.clearHint() }
             }
 
         } catch (e: Throwable) { 
-            Log.e(TAG, "analyzeScreenFast exception", e)
+            Log.e(TAG, "analyze exception", e)
         } finally {
-            try {
-                image.close()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error closing image", e)
-            }
+            try { image.close() } catch (e: Exception) {}
         }
     }
 
-    // 동적 그리드 감지 (확장성 고려)
-    private fun detectDynamicGrid(pixels: IntArray): GridBounds {
-        val centerX = screenWidth / 2
-        val startY = (screenHeight * 0.25).toInt()
-        val endY = (screenHeight * 0.80).toInt()
-
-        var boardTop = 0
-        var boardBottom = 0
-
-        // 세로 탐색 (중앙에서 검색)
-        for (y in startY..endY) {
-            val pixel = pixels[y * screenWidth + centerX]
-            val r = Color.red(pixel)
-            val g = Color.green(pixel)
-            val b = Color.blue(pixel)
-
-            // 검은색 배경 탐색 (보드 경계)
-            if (r in 20..100 && g in 20..100 && b in 20..100) {
-                if (boardTop == 0) boardTop = y
-                boardBottom = y
+    private fun processClusterPeaks(rawPeaks: List<Int>, minGap: Int): List<Int> {
+        if (rawPeaks.isEmpty()) return emptyList()
+        val result = mutableListOf<Int>()
+        var cluster = mutableListOf<Int>()
+        
+        cluster.add(rawPeaks[0])
+        for (i in 1 until rawPeaks.size) {
+            if (rawPeaks[i] - rawPeaks[i - 1] <= 15) {
+                cluster.add(rawPeaks[i])
+            } else {
+                result.add(cluster.sum() / cluster.size)
+                cluster = mutableListOf()
+                cluster.add(rawPeaks[i])
             }
         }
+        if (cluster.isNotEmpty()) result.add(cluster.sum() / cluster.size)
 
-        if (boardTop == 0 || boardBottom == 0 || (boardBottom - boardTop) < 300) {
-            boardTop = (screenHeight * 0.35).toInt()
-            boardBottom = (screenHeight * 0.75).toInt()
-        }
-
-        val targetMidY = boardTop + (boardBottom - boardTop) / 2
-        var boardLeft = 0
-        var boardRight = 0
-
-        // 가로 탐색 (좌측)
-        for (x in (screenWidth * 0.05).toInt() until centerX) {
-            val pixel = pixels[targetMidY * screenWidth + x]
-            if (Color.red(pixel) in 20..100) {
-                boardLeft = x
-                break
+        val finalPeaks = mutableListOf<Int>()
+        for (p in result) {
+            if (finalPeaks.isEmpty() || p - finalPeaks.last() >= minGap) {
+                finalPeaks.add(p)
             }
         }
-
-        // 가로 탐색 (우측)
-        for (x in (screenWidth * 0.95).toInt() downTo centerX) {
-            val pixel = pixels[targetMidY * screenWidth + x]
-            if (Color.red(pixel) in 20..100) {
-                boardRight = x
-                break
-            }
-        }
-
-        if (boardLeft == 0 || boardRight == 0 || (boardRight - boardLeft) < 500) {
-            boardLeft = (screenWidth * 0.05).toInt()
-            boardRight = (screenWidth * 0.95).toInt()
-        }
-
-        return GridBounds(boardLeft, boardTop, boardRight, boardBottom)
+        return finalPeaks
     }
 
-    // HSV 기반 색상 필터링 (안정성 향상)
+    // 💡 [안정성] HSV 기반 컬러 분석 (그림자, 가변 광원 완전 무시)
     private fun getHsvColor(pixel: Int): Int {
         val r = Color.red(pixel)
         val g = Color.green(pixel)
         val b = Color.blue(pixel)
+        if (r + g + b < 85) return 0
         
-        if (r + g + b < 80) return 0  // 검은색 = 빈 칸
-        
-        // HSV 변환
-        val rf = r / 255f
-        val gf = g / 255f
-        val bf = b / 255f
-        
-        val max = maxOf(rf, gf, bf)
-        val min = minOf(rf, gf, bf)
-        val delta = max - min
-        
-        // Hue 계산
-        val hue = when {
-            delta == 0f -> 0f
-            max == rf -> (60f * (((gf - bf) / delta) % 6f) + 360f) % 360f
-            max == gf -> (60f * (((bf - rf) / delta) + 2f)) % 360f
-            else -> (60f * (((rf - gf) / delta) + 4f)) % 360f
-        }
-        
-        // Saturation
-        val saturation = if (max == 0f) 0f else (delta / max)
-        
-        // Value
-        val value = max
+        val hsv = FloatArray(3)
+        Color.RGBToHSV(r, g, b, hsv)
+        val hue = hsv[0]
+        val sat = hsv[1]
+        val value = hsv[2]
 
-        // Hue 범위로 색상 판별
+        if (value < 0.25f || sat < 0.20f) return 0 // 무채색 및 어두운 영역 디노이즈
+
         return when {
-            // 빨강: 0-15, 345-360
-            hue < 15 || hue > 345 -> 1
-            // 노랑: 45-65
-            hue in 45f..65f -> 3
-            // 초록: 100-160
-            hue in 100f..160f -> 4
-            // 파랑: 200-260
-            hue in 200f..260f -> 2
-            // 보라: 270-310
-            hue in 270f..310f -> 5
+            hue < 16f || hue > 345f -> 1    // 빨강
+            hue in 200f..255f -> 2          // 파랑
+            hue in 44f..66f -> 3            // 노랑
+            hue in 100f..155f -> 4          // 초록
+            hue in 270f..315f -> 5          // 보라
             else -> 0
         }
     }
 
-    // 그리드 히스토리 관리
-    private fun addToGridHistory(grid: Array<IntArray>) {
-        gridHistory.add(grid.map { it.copyOf() }.toTypedArray())
-        if (gridHistory.size > MAX_HISTORY) {
-            gridHistory.removeFirst()
-        }
+    private fun addToGridHistory(grid: Array<IntArray>, rows: Int, cols: Int) {
+        gridHistory.add(Array(rows) { grid[it].copyOf() })
+        if (gridHistory.size > MAX_HISTORY) gridHistory.removeFirst()
     }
 
-    // 안정적인 그리드 생성 (노이즈 제거)
-    private fun stableGrid(): Array<IntArray> {
-        if (gridHistory.isEmpty()) {
-            return Array(GRID_ROWS) { IntArray(GRID_COLS) }
-        }
+    private fun getVotedStableGrid(rows: Int, cols: Int): Array<IntArray> {
+        val stable = Array(rows) { IntArray(cols) }
+        if (gridHistory.isEmpty()) return stable
 
-        val stableGrid = Array(GRID_ROWS) { IntArray(GRID_COLS) }
-        
-        for (r in 0 until GRID_ROWS) {
-            for (c in 0 until GRID_COLS) {
-                val colorCounts = mutableMapOf<Int, Int>()
-                
-                // 히스토리 모든 프레임에서 색상 투표
+        for (r in 0 until rows) {
+            for (c in 0 until cols) {
+                val voteMap = mutableMapOf<Int, Int>()
                 for (frame in gridHistory) {
-                    val color = frame[r][c]
-                    colorCounts[color] = (colorCounts[color] ?: 0) + 1
+                    if (r < frame.size && c < frame[r].size) {
+                        val color = frame[r][c]
+                        voteMap[color] = (voteMap[color] ?: 0) + 1
+                    }
                 }
-                
-                // 가장 빈도 높은 색상 선택
-                stableGrid[r][c] = colorCounts.maxByOrNull { it.value }?.key ?: 0
+                stable[r][c] = voteMap.maxByOrNull { it.value }?.key ?: 0
             }
         }
-        
-        return stableGrid
+        return stable
     }
 
-    data class MatchHint(val fromR: Int, val fromC: Int, val toR: Int, val toC: Int)
-    data class GridBounds(val left: Int, val top: Int, val right: Int, val bottom: Int)
-
-    // 5개 연속 매칭 패턴 찾기 (강화 버전)
     private fun findFiveMatchPattern(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
         val directions = arrayOf(Pair(0, 1), Pair(1, 0))
         
@@ -464,18 +384,15 @@ class OverlayService : Service() {
                     val nc = c + dir.second
                     
                     if (nr < rows && nc < cols && grid[nr][nc] != 0) {
-                        // 스왑
                         val temp = grid[r][c]
                         grid[r][c] = grid[nr][nc]
                         grid[nr][nc] = temp
 
-                        // 5개 연속 매칭 확인
+                        // 5개 일렬 매칭 검증
                         if (checkGridMatch5(grid, rows, cols)) {
-                            Log.d(TAG, "Found 5-match pattern at ($r,$c) -> ($nr,$nc)")
                             return MatchHint(r, c, nr, nc)
                         }
                         
-                        // 복구
                         grid[nr][nc] = grid[r][c]
                         grid[r][c] = temp
                     }
@@ -485,38 +402,46 @@ class OverlayService : Service() {
         return null
     }
 
-    // 5개 연속 검증 (향상된 로직)
+    // 💡 [알고리즘 개조] 이펙트 차단 가변 길이 5-In-Row 체커
     private fun checkGridMatch5(grid: Array<IntArray>, rows: Int, cols: Int): Boolean {
-        // 가로 5개
         for (r in 0 until rows) {
-            for (c in 0..cols - 5) {
+            for (c in 0 until cols) {
                 val color = grid[r][c]
-                if (color != 0 && 
-                    color == grid[r][c+1] && 
-                    color == grid[r][c+2] && 
-                    color == grid[r][c+3] && 
-                    color == grid[r][c+4]) {
-                    Log.d(TAG, "Horizontal match at row $r cols $c-${c+4}")
-                    return true
+                if (color == 0) continue
+                
+                // 가로 연속도 판정 (우측 방향)
+                if (c <= cols - 4) {
+                    var matchCount = 1
+                    var gapCount = 0
+                    for (i in 1 until 6) {
+                        if (c + i >= cols) break
+                        val nextColor = grid[r][c + i]
+                        if (nextColor == color) {
+                            matchCount++
+                        } else if (nextColor == 0 && gapCount < 2) { // 💡 최대 2칸의 이펙트 공백 허용
+                            gapCount++
+                        } else break
+                    }
+                    if (matchCount >= 5) return true
+                }
+
+                // 세로 연속도 판정 (아래 방향)
+                if (r <= rows - 4) {
+                    var matchCount = 1
+                    var gapCount = 0
+                    for (i in 1 until 6) {
+                        if (r + i >= rows) break
+                        val nextColor = grid[r + i][c]
+                        if (nextColor == color) {
+                            matchCount++
+                        } else if (nextColor == 0 && gapCount < 2) { // 💡 최대 2칸의 이펙트 공백 허용
+                            gapCount++
+                        } else break
+                    }
+                    if (matchCount >= 5) return true
                 }
             }
         }
-        
-        // 세로 5개
-        for (c in 0 until cols) {
-            for (r in 0..rows - 5) {
-                val color = grid[r][c]
-                if (color != 0 && 
-                    color == grid[r+1][c] && 
-                    color == grid[r+2][c] && 
-                    color == grid[r+3][c] && 
-                    color == grid[r+4][c]) {
-                    Log.d(TAG, "Vertical match at col $c rows $r-${r+4}")
-                    return true
-                }
-            }
-        }
-        
         return false
     }
 
@@ -534,14 +459,12 @@ class OverlayService : Service() {
             pixelArray = null
             gridHistory.clear()
 
-            if (overlayView != null && windowManager != null) {
-                windowManager?.removeView(overlayView)
-            }
-            if (controlView != null && windowManager != null) {
-                windowManager?.removeView(controlView)
-            }
+            if (overlayView != null) windowManager?.removeView(overlayView)
+            if (controlView != null) windowManager?.removeView(controlView)
         } catch (e: Exception) {
-            Log.e(TAG, "Error in onDestroy", e)
+            Log.e(TAG, "onDestroy error", e)
         }
     }
+
+    data class MatchHint(val fromR: Int, val fromC: Int, val toR: Int, val toC: Int)
 }
