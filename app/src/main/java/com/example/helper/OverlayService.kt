@@ -332,7 +332,7 @@ class OverlayService : Service() {
 
         } catch (e: Throwable) { 
             Log.e(TAG, "analyzeScreenFast 알고리즘 예외 발생", e)
-        } calendar {
+        } finally {
             try { image.close() } catch (e: Exception) {}
         }
     }
