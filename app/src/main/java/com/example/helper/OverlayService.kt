@@ -50,6 +50,7 @@ class OverlayService : Service() {
     private var reusableBitmap: Bitmap? = null
     private var pixelArray: IntArray? = null
     
+    // 억까 방지용 프레임 투표 이력 관리
     private val gridHistory = LinkedList<Array<IntArray>>()
     private val MAX_HISTORY = 3
 
@@ -57,12 +58,14 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.d(TAG, "OverlayService onCreate 호출됨")
         try {
             createNotificationChannel()
             val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
                 .setContentTitle("로얄매치 도우미 작동 중")
                 .setContentText("고성능 HSV 기반 탐색 알고리즘 구동 중")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build()
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -70,8 +73,9 @@ class OverlayService : Service() {
             } else {
                 startForeground(1, notification)
             }
+            Log.d(TAG, "Foreground 서비스 승격 성공")
         } catch (e: Exception) {
-            Log.e(TAG, "onCreate failed", e)
+            Log.e(TAG, "onCreate 단계에서 포그라운드 승격 실패", e)
             stopSelf()
         }
     }
@@ -88,33 +92,8 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        val metrics = DisplayMetrics()
-        windowManager?.defaultDisplay?.getRealMetrics(metrics)
-        screenWidth = metrics.widthPixels
-        screenHeight = metrics.heightPixels
-
-        // 💡 [해결 책] 중복 뷰 추가 에러 차단 가드문 설정
-        if (overlayView == null) {
-            overlayView = PatternDrawView(this)
-            val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
-                PixelFormat.TRANSLUCENT
-            )
-            try {
-                windowManager?.addView(overlayView, params)
-            } catch (e: Exception) {
-                Log.e(TAG, "overlayView add 실패 무시", e)
-            }
-        }
+        Log.d(TAG, "OverlayService onStartCommand 호출됨")
         
-        if (controlView == null) {
-            showControlOverlay()
-        }
-
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
         val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
@@ -123,35 +102,87 @@ class OverlayService : Service() {
             intent?.getParcelableExtra<Intent>("DATA_INTENT")
         }
         
-        // 미디어 프로젝션 셋업은 권한 데이터가 들어오는 두 번째 호출 때 단 한 번만 실행되도록 격리
-        if (dataIntent != null && mediaProjection == null) {
-            try {
-                val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
-                
-                backgroundThread = HandlerThread("ScreenCaptureThread").apply { start() }
-                backgroundHandler = Handler(backgroundThread!!.looper)
-
-                imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-                virtualDisplay = mediaProjection?.createVirtualDisplay(
-                    "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
-                    DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
-                )
-                
-                pixelArray = IntArray(screenWidth * screenHeight)
-                backgroundHandler?.post(analyzeRunnable)
-                Log.d(TAG, "MediaProjection 활성화 및 분석 스레드 가동 성공")
-            } catch (e: Exception) {
-                Log.e(TAG, "MediaProjection 셋업 치명적 실패", e)
-                stopSelf()
-            }
+        if (dataIntent == null) {
+            Log.e(TAG, "dataIntent가 누락되어 서비스를 종료합니다.")
+            stopSelf()
+            return START_NOT_STICKY
         }
-        
+
+        try {
+            windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            val metrics = DisplayMetrics()
+            windowManager?.defaultDisplay?.getRealMetrics(metrics)
+            screenWidth = metrics.widthPixels
+            screenHeight = metrics.heightPixels
+
+            val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
+            Log.d(TAG, "mediaProjection 객체 획득 성공")
+            
+            backgroundThread = HandlerThread("ScreenCaptureThread").apply { start() }
+            backgroundHandler = Handler(backgroundThread!!.looper)
+
+            // [안드로이드 14 대응] 필수 콜백 등록
+            mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    super.onStop()
+                    Log.d(TAG, "MediaProjection이 시스템에 의해 중지되었습니다.")
+                    stopSelf()
+                }
+            }, backgroundHandler)
+            Log.d(TAG, "MediaProjection 필수 콜백 등록 완료")
+
+            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+            
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
+            )
+            Log.d(TAG, "VirtualDisplay 가상 디스플레이 연결 완벽 성공!")
+            
+            // 고속 추출용 픽셀 배열 미리 할당
+            pixelArray = IntArray(screenWidth * screenHeight)
+            backgroundHandler?.post(analyzeRunnable)
+
+            // 💡 [핵심] 성공 신호를 MainActivity로 보내 백그라운드로 안전하게 내림
+            val finishIntent = Intent(this, MainActivity::class.java).apply {
+                action = Intent.ACTION_MAIN
+                addCategory(Intent.CATEGORY_LAUNCHER)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                putExtra("ACTION_FINISH", true)
+            }
+            startActivity(finishIntent)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "미디어 프로젝션 연동 실패!!", e)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
+        // 오버레이 뷰 구성 (중복 생성 방지 가드 포함)
+        try {
+            if (overlayView == null) {
+                overlayView = PatternDrawView(this)
+                val params = WindowManager.LayoutParams(
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                    PixelFormat.TRANSLUCENT
+                )
+                windowManager?.addView(overlayView, params)
+            }
+            if (controlView == null) {
+                showControlOverlay()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "오버레이 그리기 실패", e)
+        }
+
         return START_NOT_STICKY
     }
 
     private fun showControlOverlay() {
-        if (controlView != null) return
         try {
             val themedContext = ContextThemeWrapper(this, androidx.appcompat.R.style.Theme_AppCompat_Light_NoActionBar)
             controlView = LinearLayout(themedContext).apply {
@@ -163,12 +194,14 @@ class OverlayService : Service() {
                     cornerRadius = 15f
                 }
             }
+
             val statusText = TextView(themedContext).apply {
                 text = "● HSV SMART RUN"
                 setTextColor(Color.CYAN)
                 textSize = 10f
                 setPadding(0, 0, 15, 0)
             }
+
             val stopButton = Button(themedContext).apply {
                 text = "STOP"
                 setTextColor(Color.WHITE)
@@ -177,6 +210,7 @@ class OverlayService : Service() {
                 setPadding(8, 4, 8, 4)
                 setOnClickListener { stopSelf() }
             }
+
             controlView?.addView(statusText)
             controlView?.addView(stopButton)
 
@@ -189,18 +223,18 @@ class OverlayService : Service() {
             ).apply {
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
                 x = 0
-                y = 30
+                y = 30 
             }
             windowManager?.addView(controlView, controlParams)
         } catch (e: Exception) {
-            Log.e(TAG, "showControlOverlay failed", e)
+            Log.e(TAG, "컨트롤바 띄우기 실패", e)
         }
     }
 
     private val analyzeRunnable = object : Runnable {
         override fun run() {
-            try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "analyze error", e) }
-            backgroundHandler?.postDelayed(this, 500)
+            try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "분석 에러", e) }
+            backgroundHandler?.postDelayed(this, 500) // 0.5초 간격 정밀 분석
         }
     }
 
@@ -224,9 +258,10 @@ class OverlayService : Service() {
             buffer.rewind() 
             bitmap.copyPixelsFromBuffer(buffer)
 
-            // 스트라이드를 screenWidth로 맞춰 패딩 픽셀을 날리고 순수 알맹이만 고속 추출
+            // 스트라이드 패딩 제거 후 순수 알맹이 영역만 고속 추출
             bitmap.getPixels(currentPixels, 0, screenWidth, 0, 0, screenWidth, screenHeight)
 
+            // 스캔 최적화 범위 설정
             val startY = (screenHeight * 0.30).toInt()
             val endY = (screenHeight * 0.82).toInt()
             val startX = (screenWidth * 0.05).toInt()
@@ -237,6 +272,7 @@ class OverlayService : Service() {
             val rawXList = mutableListOf<Int>()
             val rawYList = mutableListOf<Int>()
 
+            // 1단계: 수직/수평 스캔을 통한 유효 색상 밀집축 탐색
             for (x in startX until endX step 5) {
                 var validCount = 0
                 for (y in startY until endY step 15) {
@@ -253,6 +289,7 @@ class OverlayService : Service() {
                 if (validCount > 4) rawYList.add(y)
             }
 
+            // 2단계: 피크 클러스터링을 통한 가변 그리드 중심선 산출
             val xPeaks = processClusterPeaks(rawXList, minClusterGap)
             val yPeaks = processClusterPeaks(rawYList, minClusterGap)
 
@@ -264,6 +301,7 @@ class OverlayService : Service() {
             val dynamicCols = xPeaks.size
             val dynamicRows = yPeaks.size
 
+            // 3단계: 동적 매트릭스 생성 및 HSV 색상 매핑
             val colorGrid = Array(dynamicRows) { r ->
                 IntArray(dynamicCols) { c ->
                     val px = xPeaks[c]
@@ -272,9 +310,11 @@ class OverlayService : Service() {
                 }
             }
 
+            // 4단계: 다수결 보정을 통한 화면 깜빡임/이펙트 억까 제어
             addToGridHistory(colorGrid, dynamicRows, dynamicCols)
             val stableGrid = getVotedStableGrid(dynamicRows, dynamicCols)
 
+            // 5단계: 5매칭 패턴 연산 수행
             val hint = findFiveMatchPattern(stableGrid, dynamicRows, dynamicCols)
             
             if (hint != null) {
@@ -291,8 +331,8 @@ class OverlayService : Service() {
             }
 
         } catch (e: Throwable) { 
-            Log.e(TAG, "analyze exception", e)
-        } finally {
+            Log.e(TAG, "analyzeScreenFast 알고리즘 예외 발생", e)
+        } calendar {
             try { image.close() } catch (e: Exception) {}
         }
     }
@@ -456,8 +496,9 @@ class OverlayService : Service() {
 
             if (overlayView != null) windowManager?.removeView(overlayView)
             if (controlView != null) windowManager?.removeView(controlView)
+            Log.d(TAG, "OverlayService 자원 해제 및 종료 완료")
         } catch (e: Exception) {
-            Log.e(TAG, "onDestroy error", e)
+            Log.e(TAG, "onDestroy 실패", e)
         }
     }
 
