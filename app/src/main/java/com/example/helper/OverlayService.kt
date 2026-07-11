@@ -11,8 +11,6 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
-import android.graphics.Point
-import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
@@ -31,6 +29,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.view.ContextThemeWrapper
 import androidx.core.app.NotificationCompat
+import java.nio.ByteBuffer
 
 class OverlayService : Service() {
     private val TAG = "OverlayService"
@@ -49,6 +48,7 @@ class OverlayService : Service() {
     private var screenHeight = 2400
     private var reusableBitmap: Bitmap? = null
     private var isScanningEnabled = true
+    private var pixelBuffer: ByteBuffer? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -58,7 +58,7 @@ class OverlayService : Service() {
             createNotificationChannel()
             val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
                 .setContentTitle("로얄매치 AI 마스터")
-                .setContentText("가변형 전체 격자 시뮬레이터 가동 중")
+                .setContentText("가변 격자 시스템 동작 중")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build()
@@ -81,6 +81,9 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // 중복 생성 방지 코드
+        if (mediaProjection != null) return START_NOT_STICKY
+
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
         val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
@@ -108,13 +111,16 @@ class OverlayService : Service() {
             backgroundHandler = Handler(backgroundThread!!.looper)
 
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+            
+            // 🎯 [화면공유 성공 버전 로직] 안정성이 검증된 표준 플래그(VIRTUAL_DISPLAY_FLAG_PUBLIC) 사용
             virtualDisplay = mediaProjection?.createVirtualDisplay(
                 "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC, imageReader!!.surface, null, backgroundHandler
             )
             
             backgroundHandler?.post(analyzeRunnable)
 
+            // 메인 액티비티 백그라운드 전환 처리
             val finishIntent = Intent(this, MainActivity::class.java).apply {
                 action = Intent.ACTION_MAIN
                 addCategory(Intent.CATEGORY_LAUNCHER)
@@ -124,6 +130,7 @@ class OverlayService : Service() {
             startActivity(finishIntent)
 
         } catch (e: Exception) {
+            Log.e(TAG, "MediaProjection 초기화 실패", e)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -149,26 +156,26 @@ class OverlayService : Service() {
         controlView = LinearLayout(themedContext).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(16, 8, 16, 8)
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#DD111111"))
-                cornerRadius = 16f
+            setPadding(20, 10, 20, 10)
+            background = android.graphics.drawable.GradientDrawable().apply {
+                setColor(Color.parseColor("#EE111111"))
+                cornerRadius = 20f
             }
         }
 
         val statusText = TextView(themedContext).apply {
-            text = "● DYNAMIC GRID v4 "
+            text = "● FLEX GRID ACTIVE "
             setTextColor(Color.parseColor("#FFD700"))
-            textSize = 9.5f
-            setPadding(0, 0, 12, 0)
+            textSize = 10f
+            setPadding(0, 0, 15, 0)
         }
 
         val toggleButton = Button(themedContext).apply {
             text = "ON"
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#2ECC71"))
-            textSize = 9.5f
-            layoutParams = LinearLayout.LayoutParams(90, 55).apply { setMargins(0, 0, 10, 0) }
+            textSize = 10f
+            layoutParams = LinearLayout.LayoutParams(100, 60).apply { setMargins(0, 0, 10, 0) }
             setOnClickListener {
                 isScanningEnabled = !isScanningEnabled
                 text = if (isScanningEnabled) "ON" else "OFF"
@@ -181,8 +188,8 @@ class OverlayService : Service() {
             text = "X"
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#E74C3C"))
-            textSize = 9.5f
-            layoutParams = LinearLayout.LayoutParams(60, 55)
+            textSize = 10f
+            layoutParams = LinearLayout.LayoutParams(70, 60)
             setOnClickListener { stopSelf() }
         }
 
@@ -198,7 +205,7 @@ class OverlayService : Service() {
         ).apply {
             gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
             x = 0
-            y = 90
+            y = 100
         }
         windowManager?.addView(controlView, controlParams)
     }
@@ -206,7 +213,7 @@ class OverlayService : Service() {
     private val analyzeRunnable = object : Runnable {
         override fun run() {
             try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "Loop Skip", e) }
-            backgroundHandler?.postDelayed(this, 220)
+            backgroundHandler?.postDelayed(this, 250)
         }
     }
 
@@ -230,21 +237,30 @@ class OverlayService : Service() {
             
             val bitmap = reusableBitmap!!
             buffer.rewind() 
-            bitmap.copyPixelsFromBuffer(buffer)
+            
+            val requiredBufferSize = rowStride * screenHeight
+            if (pixelBuffer == null || pixelBuffer!!.capacity() < requiredBufferSize) {
+                pixelBuffer = ByteBuffer.allocateDirect(requiredBufferSize)
+            }
+            pixelBuffer!!.clear()
+            pixelBuffer!!.put(buffer)
+            pixelBuffer!!.rewind()
+            bitmap.copyPixelsFromBuffer(pixelBuffer!!)
 
-            val scanLeft = (screenWidth * 0.03f).toInt()
-            val scanRight = (screenWidth * 0.97f).toInt()
-            val scanTop = (screenHeight * 0.28f).toInt() // 상단 기믹 위쪽까지 수색선 확장
-            val scanBottom = (screenHeight * 0.88f).toInt()
+            // 🎯 [기능 업그레이드]: 고정 구역을 없애고 화면 전체 영역을 유동적으로 서칭하도록 범위 확장
+            val scanLeft = (screenWidth * 0.02f).toInt()
+            val scanRight = (screenWidth * 0.98f).toInt()
+            val scanTop = (screenHeight * 0.22f).toInt()     // 상단 기믹 구역 완전 포함
+            val scanBottom = (screenHeight * 0.90f).toInt()  // 하단 보드판 영역 끝까지 포함
 
-            // 🎯 [핵심 수정] 중간 공백 유무와 상관없이 화면에 존재하는 일반 블록들의 '절대 최외곽 경계선' 산출
             var minBlockX = screenWidth
             var maxBlockX = 0
             var minBlockY = screenHeight
             var maxBlockY = 0
 
-            for (y in scanTop until scanBottom step 15) {
-                for (x in scanLeft until scanRight step 15) {
+            // 실시간 블록 탐색을 통해 유효 보드판의 동적 외곽선 감지
+            for (y in scanTop until scanBottom step 18) {
+                for (x in scanLeft until scanRight step 18) {
                     if (identifyColorHSV(bitmap.getPixel(x, y)) in 1..5) {
                         if (x < minBlockX) minBlockX = x
                         if (x > maxBlockX) maxBlockX = x
@@ -257,25 +273,24 @@ class OverlayService : Service() {
             val boardWidth = maxBlockX - minBlockX
             val boardHeight = maxBlockY - minBlockY
 
-            // 유효성 최소 컷 검증
-            if (boardWidth < screenWidth * 0.5 || boardHeight < 150) {
+            // 정상적인 게임 화면이 아니라고 판단되면 힌트 클리어
+            if (boardWidth < screenWidth * 0.5 || boardHeight < 200) {
                 overlayView?.post { overlayView?.clearHint() }
                 return
             }
 
-            // 가변형 해상도 기반 단일 블록 스케일 산출
-            val approxBlockSize = screenWidth / 9.3f
+            // 블록 해상도 비율 자동 계산 (로얄매치 규격 기준)
+            val approxBlockSize = screenWidth / 9.2f
             val currentGridCols = Math.round(boardWidth.toFloat() / approxBlockSize).coerceIn(4, 11)
-            val currentGridRows = Math.round(boardHeight.toFloat() / approxBlockSize).coerceIn(2, 13)
+            val currentGridRows = Math.round(boardHeight.toFloat() / approxBlockSize).coerceIn(2, 14)
 
             val blockSizeX = boardWidth.toFloat() / currentGridCols
             val blockSizeY = boardHeight.toFloat() / currentGridRows
 
-            // 전체 영역 단일 앵커 포인트 수립
             val topLeftAnchorX = minBlockX + (blockSizeX / 2f)
             val topLeftAnchorY = minBlockY + (blockSizeY / 2f)
 
-            // 전체 통합 격자 데이터 샘플링 (중간 기믹 자리는 0으로 자동 매핑됨)
+            // 기믹 자리(빈공간)는 자동으로 0 매핑되는 가변 구조체 채우기
             val colorGrid = Array(currentGridRows) { IntArray(currentGridCols) }
             for (r in 0 until currentGridRows) {
                 for (c in 0 until currentGridCols) {
@@ -285,7 +300,7 @@ class OverlayService : Service() {
                 }
             }
 
-            // 5-Match 전수 시뮬레이션 매칭 엔진 작동
+            // 미러볼 생성을 목표로 하는 5-Match 특화 시뮬레이터 구동
             val hint = findFiveMatchBySimulation(colorGrid, currentGridRows, currentGridCols)
             if (hint != null) {
                 val fx = topLeftAnchorX + (hint.fromC * blockSizeX)
@@ -298,7 +313,7 @@ class OverlayService : Service() {
                 overlayView?.post { overlayView?.clearHint() }
             }
         } catch (e: Throwable) {
-            Log.e(TAG, "분석 주기 예외", e)
+            Log.e(TAG, "스캔 엔진 주기 에러", e)
         } finally {
             try { image.close() } catch (e: Exception) {}
         }
@@ -307,9 +322,9 @@ class OverlayService : Service() {
     private fun getPixelBlockColor(bitmap: Bitmap, cx: Int, cy: Int): Int {
         val votes = IntArray(6)
         votes[identifyColorHSV(bitmap.getPixel(cx, cy))]++
-        votes[identifyColorHSV(bitmap.getPixel((cx - 8).coerceIn(0, screenWidth - 1), cy))]++
-        votes[identifyColorHSV(bitmap.getPixel((cx + 8).coerceIn(0, screenWidth - 1), cy))]++
-        votes[identifyColorHSV(bitmap.getPixel(cx, (cy - 8).coerceIn(0, screenHeight - 1)))]++
+        votes[identifyColorHSV(bitmap.getPixel((cx - 6).coerceIn(0, screenWidth - 1), cy))]++
+        votes[identifyColorHSV(bitmap.getPixel((cx + 6).coerceIn(0, screenWidth - 1), cy))]++
+        votes[identifyColorHSV(bitmap.getPixel(cx, (cy - 6).coerceIn(0, screenHeight - 1)))]++
         votes[identifyColorHSV(bitmap.getPixel(cx, (cy + 8).coerceIn(0, screenHeight - 1)))]++
         
         var maxVote = 0
@@ -324,7 +339,7 @@ class OverlayService : Service() {
         val r = Color.red(pixel)
         val g = Color.green(pixel)
         val b = Color.blue(pixel)
-        if (r + g + b < 95 || r + g + b > 725) return 0
+        if (r + g + b < 95 || r + g + b > 730) return 0
 
         val hsv = FloatArray(3)
         Color.RGBToHSV(r, g, b, hsv)
@@ -332,14 +347,14 @@ class OverlayService : Service() {
         val sat = hsv[1]
         val value = hsv[2]
 
-        if (sat < 0.15f || value < 0.15f) return 0
+        if (sat < 0.14f || value < 0.14f) return 0
 
         return when {
-            (hue >= 345f || hue <= 15f) -> 1  // 빨강 (하트)
-            (hue in 195f..245f) -> 2          // 파랑 (방패)
-            (hue in 40f..65f) -> 3            // 노랑 (왕관)
-            (hue in 90f..145f) -> 4           // 초록 (나뭇잎)
-            (hue in 265f..330f) -> 5          // 보라 (새 깃털)
+            (hue >= 345f || hue <= 15f) -> 1  // 하트 (레드)
+            (hue in 195f..245f) -> 2          // 방패 (블루)
+            (hue in 40f..65f) -> 3            // 왕관 (옐로우)
+            (hue in 90f..145f) -> 4           // 나뭇잎 (그린)
+            (hue in 265f..330f) -> 5          // 깃털 (퍼플)
             else -> 0
         }
     }
@@ -368,7 +383,7 @@ class OverlayService : Service() {
 
         fun cloneGrid() = Array(rows) { r -> grid[r].clone() }
 
-        // 가로 스왑 테스트
+        // 가로 스왑 시뮬레이션
         for (r in 0 until rows) {
             for (c in 0 until cols - 1) {
                 if (grid[r][c] == 0 && grid[r][c+1] == 0) continue
@@ -383,7 +398,7 @@ class OverlayService : Service() {
             }
         }
 
-        // 세로 스왑 테스트
+        // 세로 스왑 시뮬레이션
         for (r in 0 until rows - 1) {
             for (c in 0 until cols) {
                 if (grid[r][c] == 0 && grid[r+1][c] == 0) continue
@@ -410,10 +425,11 @@ class OverlayService : Service() {
             mediaProjection?.stop()
             reusableBitmap?.recycle()
             reusableBitmap = null
+            pixelBuffer = null
             if (overlayView != null) { windowManager?.removeView(overlayView); overlayView = null }
             if (controlView != null) { windowManager?.removeView(controlView); controlView = null }
         } catch (e: Exception) {
-            Log.e(TAG, "해제 예외", e)
+            Log.e(TAG, "리소스 해제 실패", e)
         }
     }
 
