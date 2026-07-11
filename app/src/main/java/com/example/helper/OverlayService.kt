@@ -58,8 +58,8 @@ class OverlayService : Service() {
         try {
             createNotificationChannel()
             val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
-                .setContentTitle("로얄매치 AI 헬퍼")
-                .setContentText("앵커 포인트 정밀 좌표계 가동 중")
+                .setContentTitle("로얄매치 앵커 고도화 헬퍼")
+                .setContentText("실시간 컬러 밀도 앵커 트래킹 가동 중")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build()
@@ -172,8 +172,8 @@ class OverlayService : Service() {
             }
 
             val statusText = TextView(themedContext).apply {
-                text = "● ANCHOR SCAN "
-                setTextColor(Color.CYAN)
+                text = "● SMART ANCHOR v2 "
+                setTextColor(Color.GREEN)
                 textSize = 9.5f
                 setPadding(0, 0, 12, 0)
             }
@@ -229,7 +229,7 @@ class OverlayService : Service() {
     private val analyzeRunnable = object : Runnable {
         override fun run() {
             try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "루프 스킵", e) }
-            backgroundHandler?.postDelayed(this, 300)
+            backgroundHandler?.postDelayed(this, 250) // 반응 속도 상향 조절
         }
     }
 
@@ -256,136 +256,87 @@ class OverlayService : Service() {
             buffer.rewind() 
             bitmap.copyPixelsFromBuffer(buffer)
 
-            // 게임판 좌우 절대 마진선 확보
-            val boardLeft = (screenWidth * 0.045f).toInt()
-            val boardRight = (screenWidth * 0.955f).toInt()
-            val boardWidth = boardRight - boardLeft
+            // 🎯 [핵심 개선안] 컬러 밀도 매핑을 통한 실제 게임 퍼즐판 영역 정밀 추출
+            var minBlockX = screenWidth
+            var maxBlockX = 0
+            var minBlockY = screenHeight
+            var maxBlockY = 0
+            var detectedBlockCount = 0
 
-            val scanXStart = (screenWidth * 0.15).toInt()
-            val scanXEnd = (screenWidth * 0.85).toInt()
-            val scanYStart = (screenHeight * 0.35).toInt()
-            val scanYEnd = (screenHeight * 0.84).toInt()
+            // 보드판이 위치할 수 있는 최적 추적 윈도우 스캔 (가로/세로 촘촘한 그리드 샘플링)
+            val stepX = 25
+            val stepY = 25
+            val scanLeft = (screenWidth * 0.03f).toInt()
+            val scanRight = (screenWidth * 0.97f).toInt()
+            val scanTop = (screenHeight * 0.30f).toInt()
+            val scanBottom = (screenHeight * 0.88f).toInt()
 
-            val hProfile = IntArray(screenHeight)
-            var profileSum = 0L
-            var profileCount = 0
-
-            for (y in scanYStart until scanYEnd) {
-                var diff = 0
-                for (x in scanXStart until scanXEnd step 12) {
-                    val p1 = bitmap.getPixel(x, y)
-                    val p2 = bitmap.getPixel(x, y + 2)
-                    diff += abs(Color.red(p1) - Color.red(p2)) + abs(Color.green(p1) - Color.green(p2)) + abs(Color.blue(p1) - Color.blue(p2))
-                }
-                hProfile[y] = diff
-                if (y > screenHeight * 0.65) {
-                    profileSum += diff
-                    profileCount++
-                }
-            }
-
-            val baselineAvg = if (profileCount > 0) profileSum / profileCount else 1000
-            val peakThreshold = baselineAvg * 1.35
-            var boardBottom = 0
-
-            for (y in (screenHeight * 0.83).toInt() downTo (screenHeight * 0.72).toInt()) {
-                if (hProfile[y] > peakThreshold) {
-                    if (hProfile[y] >= hProfile[y - 1] && hProfile[y] >= hProfile[y + 1]) {
-                        boardBottom = y
-                        break
+            for (y in scanTop until scanBottom step stepY) {
+                for (x in scanLeft until scanRight step stepX) {
+                    val colorId = identifyColorHSV(bitmap.getPixel(x, y))
+                    if (colorId in 1..5) { // 유효한 블록 컬러가 발견된 경우에만 바운더리 확장
+                        if (x < minBlockX) minBlockX = x
+                        if (x > maxBlockX) maxBlockX = x
+                        if (y < minBlockY) minBlockY = y
+                        if (y > maxBlockY) maxBlockY = y
+                        detectedBlockCount++
                     }
                 }
             }
 
-            if (boardBottom == 0) {
-                boardBottom = (screenHeight * 0.818f).toInt()
-            }
-
-            // 🎯 1️⃣ 가변 격자 자동 판별 및 앵커 포인트 수식 최적화 매칭 조율 단원
-            var bestCols = 0
-            var bestRows = 0
-            var bestStrideX = 0f
-            var bestStrideY = 0f
-            var bestTopLeftAnchorX = 0f
-            var bestTopLeftAnchorY = 0f
-            var maxValidBlocks = -1
-
-            // 7x7부터 10x10까지 가변 그리드를 실시간 대입 평가
-            for (testCols in 7..10) {
-                val blockSize = boardWidth.toFloat() / testCols
-                val testRows = ((boardBottom - scanYStart) / blockSize).toInt()
-
-                // 메일 제안 공식: [첫 블록 중심 Anchor]과 [끝 블록 중심 Anchor] 도출
-                // 정확한 반 블록(blockSize / 2) 여백 마진을 사용해 5.5% 비율을 기하학적으로 완벽 연동
-                val topLeftAnchorX = boardLeft + (blockSize / 2f)
-                val bottomRightAnchorX = boardRight - (blockSize / 2f)
-                
-                val bottomRightAnchorY = boardBottom - (blockSize / 2f)
-                val topLeftAnchorY = bottomRightAnchorY - (testRows - 1) * blockSize
-
-                // ★ 메일의 핵심 공식: (격자수 - 1) 나누기로 축적 오차 제로화!
-                val strideX = if (testCols > 1) (bottomRightAnchorX - topLeftAnchorX) / (testCols - 1) else blockSize
-                val strideY = blockSize // 정사각형 성질 유지
-
-                var validCount = 0
-                for (r in 0 until testRows) {
-                    for (c in 0 until testCols) {
-                        // 상대 좌표계를 기반으로 각 블록의 자석 정중앙 픽셀 계산
-                        val cx = (topLeftAnchorX + (c * strideX)).toInt()
-                        val cy = (topLeftAnchorY + (r * strideY)).toInt()
-                        
-                        if (cx in 0 until bitmap.width && cy in 0 until bitmap.height) {
-                            if (getPixelBlockColor(bitmap, cx, cy) in 1..5) {
-                                validCount++
-                            }
-                        }
-                    }
-                }
-
-                if (validCount > maxValidBlocks) {
-                    maxValidBlocks = validCount
-                    bestCols = testCols
-                    bestRows = testRows
-                    bestStrideX = strideX
-                    bestStrideY = strideY
-                    bestTopLeftAnchorX = topLeftAnchorX
-                    bestTopLeftAnchorY = topLeftAnchorY
-                }
-            }
-
-            if (maxValidBlocks < 8 || bestCols == 0 || bestRows == 0) {
+            // 노이즈 방지 검증: 발견된 유효 블록 노드가 너무 적으면 보드판 미형성으로 판단하고 스킵
+            if (detectedBlockCount < 15 || (maxBlockX - minBlockX) < screenWidth * 0.5) {
                 overlayView?.post { overlayView?.clearHint() }
                 return
             }
 
-            // 🎯 2️⃣ 확정된 최적의 앵커 매트릭스를 기반으로 컬러 배열 최종 빌드
-            val colorGrid = Array(bestRows) { IntArray(bestCols) }
-            for (r in 0 until bestRows) {
-                for (c in 0 until bestCols) {
-                    val cx = (bestTopLeftAnchorX + (c * bestStrideX)).toInt()
-                    val cy = (bestTopLeftAnchorY + (r * bestStrideY)).toInt()
-                    if (cx in 0 until bitmap.width && cy in 0 until bitmap.height) {
-                        colorGrid[r][c] = getPixelBlockColor(bitmap, cx, cy)
-                    }
+            // 마진을 주어 실제 첫 번째 블록과 마지막 블록의 중심선 안착 유도
+            val boardLeft = minBlockX
+            val boardRight = maxBlockX
+            val boardTop = minBlockY
+            val boardBottom = maxBlockY
+            
+            val boardWidth = boardRight - boardLeft
+            val boardHeight = boardBottom - boardTop
+
+            // 🎯 가변 격자 행/열 동적 추정 연산 (8x8 스탠다드 및 4x10 등의 변형 하단 패널 모두 대응)
+            // 보통 블록의 한 칸당 크기는 대략 100~135픽셀 사이입니다. 이를 기반으로 유동적 나눗셈 계산
+            val approxBlockSize = screenWidth / 8.5f
+            val currentGridCols = Math.round(boardWidth.toFloat() / approxBlockSize + 0.3f).coerceIn(5, 11)
+            val currentGridRows = Math.round(boardHeight.toFloat() / approxBlockSize + 0.3f).coerceIn(3, 11)
+
+            // ★ 메일 제안 완벽 구현: 오차 누적을 원천 차단하는 동적 앵커 간격 계산법 적용
+            val strideX = if (currentGridCols > 1) boardWidth.toFloat() / (currentGridCols - 1) else approxBlockSize
+            val strideY = if (currentGridRows > 1) boardHeight.toFloat() / (currentGridRows - 1) else approxBlockSize
+
+            val topLeftAnchorX = boardLeft.toFloat()
+            val topLeftAnchorY = boardTop.toFloat()
+
+            // 🎯 확정된 동적 앵커 매트릭스를 기반으로 컬러 격자(Grid) 배열 빌드
+            val colorGrid = Array(currentGridRows) { IntArray(currentGridCols) }
+            for (r in 0 until currentGridRows) {
+                for (c in 0 until currentGridCols) {
+                    val cx = (topLeftAnchorX + (c * strideX)).toInt().coerceIn(0, screenWidth - 1)
+                    val cy = (topLeftAnchorY + (r * strideY)).toInt().coerceIn(0, screenHeight - 1)
+                    colorGrid[r][c] = getPixelBlockColor(bitmap, cx, cy)
                 }
             }
 
-            // ⚡ 3️⃣ 녹녹노녹녹(OOXOO) 5-Ball 정밀 추적기 작동 및 오버레이 드로우 호출
-            val hint = findExactOOXOOMatch5(colorGrid, bestRows, bestCols)
+            // ⚡ 5-Ball 매칭 연산 엔진 가동
+            val hint = findExactOOXOOMatch5(colorGrid, currentGridRows, currentGridCols)
             if (hint != null) {
-                // 힌트 블록 좌표 역시 오차 없는 정밀 앵커 수식 기반 픽셀로 환산하여 뷰어에 토스
-                val fx = bestTopLeftAnchorX + (hint.fromC * bestStrideX)
-                val fy = bestTopLeftAnchorY + (hint.fromR * bestStrideY)
-                val tx = bestTopLeftAnchorX + (hint.toC * bestStrideX)
-                val ty = bestTopLeftAnchorY + (hint.toR * bestStrideY)
+                val fx = topLeftAnchorX + (hint.fromC * strideX)
+                val fy = topLeftAnchorY + (hint.fromR * strideY)
+                val tx = topLeftAnchorX + (hint.toC * strideX)
+                val ty = topLeftAnchorY + (hint.toR * strideY)
                 
-                val displayBlockSize = bestStrideX
+                val displayBlockSize = strideX
                 overlayView?.post { overlayView?.setHint(fx, fy, tx, ty, displayBlockSize) }
             } else {
                 overlayView?.post { overlayView?.clearHint() }
             }
         } catch (e: Throwable) {
-            Log.e(TAG, "실시간 프레임 앵커 분석 예외", e)
+            Log.e(TAG, "프레임 분석 루프 예외", e)
         } finally {
             try { image.close() } catch (e: Exception) {}
         }
@@ -393,11 +344,12 @@ class OverlayService : Service() {
 
     private fun getPixelBlockColor(bitmap: Bitmap, cx: Int, cy: Int): Int {
         val votes = IntArray(6)
+        // 중심부 주변 5점 샘플링 표결 처리로 판독 정밀도 상향
         votes[identifyColorHSV(bitmap.getPixel(cx, cy))]++
-        votes[identifyColorHSV(bitmap.getPixel(cx - 6, cy))]++
-        votes[identifyColorHSV(bitmap.getPixel(cx + 6, cy))]++
-        votes[identifyColorHSV(bitmap.getPixel(cx, cy - 6))]++
-        votes[identifyColorHSV(bitmap.getPixel(cx, cy + 6))]++
+        votes[identifyColorHSV(bitmap.getPixel((cx - 8).coerceIn(0, screenWidth - 1), cy))]++
+        votes[identifyColorHSV(bitmap.getPixel((cx + 8).coerceIn(0, screenWidth - 1), cy))]++
+        votes[identifyColorHSV(bitmap.getPixel(cx, (cy - 8).coerceIn(0, screenHeight - 1)))]++
+        votes[identifyColorHSV(bitmap.getPixel(cx, (cy + 8).coerceIn(0, screenHeight - 1)))]++
         
         var maxVote = 0
         var winner = 0
@@ -414,7 +366,7 @@ class OverlayService : Service() {
         val r = Color.red(pixel)
         val g = Color.green(pixel)
         val b = Color.blue(pixel)
-        if (r + g + b < 90 || r + g + b > 720) return 0
+        if (r + g + b < 100 || r + g + b > 710) return 0
 
         val hsv = FloatArray(3)
         Color.RGBToHSV(r, g, b, hsv)
@@ -422,7 +374,7 @@ class OverlayService : Service() {
         val sat = hsv[1]
         val value = hsv[2]
 
-        if (sat < 0.15f || value < 0.15f) return 0
+        if (sat < 0.16f || value < 0.16f) return 0
 
         return when {
             (hue >= 345f || hue <= 15f) -> 1  // 빨강 (하트)
@@ -435,7 +387,7 @@ class OverlayService : Service() {
     }
 
     private fun findExactOOXOOMatch5(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
-        // 1. 가로축 수색 [ O O X O O ]
+        // 1. 가로축 5개 일렬 매칭 수색 [ O O X O O ]
         for (r in 0 until rows) {
             for (c in 0..cols - 5) {
                 val t = grid[r][c]
@@ -455,7 +407,7 @@ class OverlayService : Service() {
             }
         }
 
-        // 2. 세로축 수색 [ O O X O O ]
+        // 2. 세로축 5개 일렬 매칭 수색 [ O O X O O ]
         for (c in 0 until cols) {
             for (r in 0..rows - 5) {
                 val t = grid[r][c]
