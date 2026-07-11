@@ -46,20 +46,20 @@ class OverlayService : Service() {
     
     private var screenWidth = 1080
     private var screenHeight = 2400
-    private val GRID_COLS = 8
-    private val GRID_ROWS = 8
     private var reusableBitmap: Bitmap? = null
+
+    // 제어용 스캔 ON/OFF 플래그
+    private var isScanningEnabled = true
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "OverlayService onCreate 호출됨")
         try {
             createNotificationChannel()
             val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
-                .setContentTitle("로얄매치 5라인 헬퍼 작동 중")
-                .setContentText("미러볼 생성 패턴을 정밀 분석하고 있습니다.")
+                .setContentTitle("로얄매치 AI 헬퍼")
+                .setContentText("빛의 볼(OOXOO) 패턴을 감시 중입니다.")
                 .setSmallIcon(android.R.drawable.ic_dialog_info)
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build()
@@ -69,27 +69,20 @@ class OverlayService : Service() {
             } else {
                 startForeground(1, notification)
             }
-            Log.d(TAG, "Foreground 서비스 승격 성공")
         } catch (e: Exception) {
-            Log.e(TAG, "onCreate 단계에서 포그라운드 승격 실패", e)
+            Log.e(TAG, "Foreground 서비스 승격 실패", e)
             stopSelf()
         }
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                "helper_channel", "로얄매치 서비스",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(channel)
+            val channel = NotificationChannel("helper_channel", "로얄매치 서비스", NotificationManager.IMPORTANCE_LOW)
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "OverlayService onStartCommand 호출됨")
-        
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
         val dataIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra("DATA_INTENT", Intent::class.java)
@@ -99,7 +92,6 @@ class OverlayService : Service() {
         }
         
         if (dataIntent == null) {
-            Log.e(TAG, "dataIntent가 누락되어 서비스를 종료합니다.")
             stopSelf()
             return START_NOT_STICKY
         }
@@ -113,32 +105,26 @@ class OverlayService : Service() {
 
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
-            Log.d(TAG, "mediaProjection 객체 획득 성공")
             
-            backgroundThread = HandlerThread("ScreenCaptureThread").apply { start() }
+            backgroundThread = HandlerThread("OOXOO_Scanner").apply { start() }
             backgroundHandler = Handler(backgroundThread!!.looper)
 
-            // 화면 공유 성공을 이끌어낸 안드로이드 14 패치 콜백 유지
             mediaProjection?.registerCallback(object : MediaProjection.Callback() {
                 override fun onStop() {
                     super.onStop()
-                    Log.d(TAG, "MediaProjection이 시스템에 의해 중지되었습니다.")
                     stopSelf()
                 }
             }, backgroundHandler)
-            Log.d(TAG, "MediaProjection 필수 콜백 등록 완료")
 
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-            
             virtualDisplay = mediaProjection?.createVirtualDisplay(
                 "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
             )
-            Log.d(TAG, "VirtualDisplay 가상 디스플레이 연결 완벽 성공!")
             
             backgroundHandler?.post(analyzeRunnable)
 
-            // 성공 시 메인 액티비티를 안전하게 내리는 신호 구조 유지
+            // 메인 액티비티 숨기기 및 타겟 게임 전환 유도
             val finishIntent = Intent(this, MainActivity::class.java).apply {
                 action = Intent.ACTION_MAIN
                 addCategory(Intent.CATEGORY_LAUNCHER)
@@ -148,18 +134,17 @@ class OverlayService : Service() {
             startActivity(finishIntent)
 
         } catch (e: Exception) {
-            Log.e(TAG, "미디어 프로젝션 연동 실패!!", e)
+            Log.e(TAG, "미디어 프로젝션 초기화 실패", e)
             stopSelf()
             return START_NOT_STICKY
         }
 
-        // 오버레이 뷰 드로잉
+        // 오버레이 가이드 레이어 생성
         try {
             if (overlayView == null) {
                 overlayView = PatternDrawView(this)
                 val params = WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.MATCH_PARENT,
-                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
                     WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
                     PixelFormat.TRANSLUCENT
@@ -168,13 +153,12 @@ class OverlayService : Service() {
             }
             showControlOverlay()
         } catch (e: Exception) {
-            Log.e(TAG, "오버레이 그리기 실패", e)
+            Log.e(TAG, "오버레이 뷰 표출 실패", e)
         }
 
         return START_NOT_STICKY
     }
 
-    // 💡 변경 포인트: 얇게 다듬고 상단으로 바짝 붙인 미니멀 상태바 UI
     private fun showControlOverlay() {
         if (controlView != null) return
         try {
@@ -182,57 +166,80 @@ class OverlayService : Service() {
             controlView = LinearLayout(themedContext).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
-                setPadding(12, 6, 12, 6) // 패딩 대폭 축소 (슬림화)
+                setPadding(16, 8, 16, 8)
                 background = GradientDrawable().apply {
-                    setColor(Color.parseColor("#CC111111")) // 시인성을 높인 다크 스킨
-                    cornerRadius = 12f
+                    setColor(Color.parseColor("#CC111111"))
+                    cornerRadius = 16f
                 }
             }
 
             val statusText = TextView(themedContext).apply {
-                text = "● 5-LINE"
-                setTextColor(Color.GREEN)
-                textSize = 9f // 폰트 크기 다운
+                text = "● 5-BALL "
+                setTextColor(Color.YELLOW)
+                textSize = 9.5f
                 setPadding(0, 0, 12, 0)
             }
 
-            val stopButton = Button(themedContext).apply {
-                text = "X" // 깔끔한 단일 문자 마킹
+            // ON/OFF 컨트롤러 스위치
+            val toggleButton = Button(themedContext).apply {
+                text = "ON"
                 setTextColor(Color.WHITE)
-                setBackgroundColor(Color.parseColor("#AA3333")) 
-                textSize = 9f
-                layoutParams = LinearLayout.LayoutParams(55, 45) // 버튼 컴팩트화
+                setBackgroundColor(Color.parseColor("#4CD964")) 
+                textSize = 9.5f
+                layoutParams = LinearLayout.LayoutParams(90, 55).apply { setMargins(0, 0, 10, 0) }
+                setOnClickListener {
+                    isScanningEnabled = !isScanningEnabled
+                    if (isScanningEnabled) {
+                        text = "ON"
+                        setBackgroundColor(Color.parseColor("#4CD964"))
+                    } else {
+                        text = "OFF"
+                        setBackgroundColor(Color.parseColor("#8E8E93")) 
+                        overlayView?.clearHint() 
+                    }
+                }
+            }
+
+            // 앱 종료 킬스위치
+            val stopButton = Button(themedContext).apply {
+                text = "X"
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.parseColor("#FF3B30")) 
+                textSize = 9.5f
+                layoutParams = LinearLayout.LayoutParams(60, 55)
                 setOnClickListener { stopSelf() }
             }
 
             controlView?.addView(statusText)
+            controlView?.addView(toggleButton)
             controlView?.addView(stopButton)
 
             val controlParams = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.WRAP_CONTENT,
-                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT
             ).apply {
-                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL // 중앙 상단으로 배치하여 게임 방해 방지
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
                 x = 0
-                y = 75 // 상단 노치 영역 바로 아래(75px)로 높게 밀착 조절
+                y = 80 
             }
             windowManager?.addView(controlView, controlParams)
         } catch (e: Exception) {
-            Log.e(TAG, "컨트롤바 띄우기 실패", e)
+            Log.e(TAG, "상단 제어 바 생성 에러", e)
         }
     }
 
     private val analyzeRunnable = object : Runnable {
         override fun run() {
-            try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "분석 에러", e) }
-            backgroundHandler?.postDelayed(this, 400) // 분석 주기를 400ms로 조절하여 쾌적함 유지
+            try { analyzeScreenFast() } catch (e: Exception) { Log.e(TAG, "스캔 주기 에러", e) }
+            backgroundHandler?.postDelayed(this, 300) // 0.3초마다 쾌적하게 갱신
         }
     }
 
     private fun analyzeScreenFast() {
+        if (!isScanningEnabled) return
+
         val reader = imageReader ?: return
         val image = try { reader.acquireLatestImage() } catch (e: Exception) { null } ?: return
         
@@ -244,7 +251,6 @@ class OverlayService : Service() {
             val rowPadding = rowStride - pixelStride * screenWidth
             val adjustedWidth = screenWidth + rowPadding / pixelStride
 
-            // 💡 메모리 누수 방지 비트맵 재사용 로직 유지
             if (reusableBitmap == null || reusableBitmap!!.width != adjustedWidth || reusableBitmap!!.height != screenHeight) {
                 reusableBitmap?.recycle()
                 reusableBitmap = Bitmap.createBitmap(adjustedWidth, screenHeight, Bitmap.Config.ARGB_8888)
@@ -254,14 +260,13 @@ class OverlayService : Service() {
             buffer.rewind() 
             bitmap.copyPixelsFromBuffer(buffer)
 
-            var boardTop = 0
-            var boardBottom = 0
-            var boardLeft = 0
-            var boardRight = 0
+            var boardTop = 0; var boardBottom = 0
+            var boardLeft = 0; var boardRight = 0
             val centerX = screenWidth / 2
             val startY = (screenHeight * 0.25).toInt()
             val endY = (screenHeight * 0.80).toInt()
 
+            // 1. 다이나믹 게임 보드판 탐색 (로얄매치 고유 브라운 톤 마스킹)
             for (y in startY..endY) {
                 val pixel = bitmap.getPixel(centerX, y)
                 if (Color.red(pixel) in 30..95 && Color.green(pixel) in 25..85 && Color.blue(pixel) in 20..80) {
@@ -270,9 +275,10 @@ class OverlayService : Service() {
                 }
             }
 
+            // [타이틀/로딩 감지 방어막] 보드가 안 잡히거나 너무 작으면 무조건 연산 스킵
             if (boardTop == 0 || boardBottom == 0 || (boardBottom - boardTop) < 300) {
-                boardTop = (screenHeight * 0.35).toInt()
-                boardBottom = (screenHeight * 0.75).toInt()
+                overlayView?.post { overlayView?.clearHint() }
+                return
             }
 
             val targetMidY = boardTop + (boardBottom - boardTop) / 2
@@ -283,104 +289,159 @@ class OverlayService : Service() {
                 if (Color.red(bitmap.getPixel(x, targetMidY)) in 30..95) { boardRight = x; break }
             }
 
-            if (boardLeft == 0 || boardRight == 0 || (boardRight - boardLeft) < 500) {
+            if (boardLeft == 0 || boardRight == 0) {
                 boardLeft = (screenWidth * 0.05).toInt()
                 boardRight = (screenWidth * 0.95).toInt()
             }
 
             val boardWidth = boardRight - boardLeft
-            val blockSize = boardWidth / GRID_COLS
-            val colorGrid = Array(GRID_ROWS) { IntArray(GRID_COLS) }
+            val boardHeight = boardBottom - boardTop
 
-            for (r in 0 until GRID_ROWS) {
-                for (c in 0 until GRID_COLS) {
-                    val pixelX = boardLeft + (c * blockSize) + (blockSize / 2)
-                    val pixelY = boardTop + (r * blockSize) + (blockSize / 2)
-                    if (pixelX >= 0 && pixelX < bitmap.width && pixelY >= 0 && pixelY < bitmap.height) {
-                        colorGrid[r][c] = identifyColorSpec(bitmap.getPixel(pixelX, pixelY))
+            // 2. 가변 행렬 구조 투표 매핑 ($7\times7$ ~ $10\times10$)
+            var bestCols = 0
+            var bestRows = 0
+            var bestBlockSize = 0
+            var maxValidCount = -1
+
+            for (testCols in 7..10) {
+                val testBlockSize = boardWidth / testCols
+                val testRows = ((boardHeight + testBlockSize / 2) / testBlockSize).coerceIn(5, 12)
+                var validCount = 0
+
+                for (r in 0 until testRows) {
+                    for (c in 0 until testCols) {
+                        val px = boardLeft + (c * testBlockSize) + (testBlockSize / 2)
+                        val py = boardTop + (r * testBlockSize) + (testBlockSize / 2)
+                        if (px in 0 until bitmap.width && py in 0 until bitmap.height) {
+                            val color = identifyColorHSV(bitmap.getPixel(px, py))
+                            if (color in 1..5) validCount++
+                        }
+                    }
+                }
+
+                if (validCount > maxValidCount) {
+                    maxValidCount = validCount
+                    bestCols = testCols
+                    bestRows = testRows
+                    bestBlockSize = testBlockSize
+                }
+            }
+
+            // [메뉴 창 오픈 시 스킵 방어막] 활성 블록 개수가 너무 적으면 게임 중이 아닌 것으로 판정
+            if (maxValidCount < 12 || bestCols == 0 || bestRows == 0) {
+                overlayView?.post { overlayView?.clearHint() }
+                return
+            }
+
+            // 3. 확정된 가변 보드판에 맞춤형 컬러 매트릭스 추출
+            val colorGrid = Array(bestRows) { IntArray(bestCols) }
+            for (r in 0 until bestRows) {
+                for (c in 0 until bestCols) {
+                    val px = boardLeft + (c * bestBlockSize) + (bestBlockSize / 2)
+                    val py = boardTop + (r * bestBlockSize) + (bestBlockSize / 2)
+                    if (px in 0 until bitmap.width && py in 0 until bitmap.height) {
+                        colorGrid[r][c] = identifyColorHSV(bitmap.getPixel(px, py))
                     }
                 }
             }
 
-            // 💡 5개 매칭(미러볼 유도) 조건 패치 적용된 탐색기 작동
-            val hint = findFiveMatchPattern(colorGrid, GRID_ROWS, GRID_COLS)
+            // ⚡ 4. [주문형 핵심 기능] 오직 O O X O O 일자 패턴만 콕 집어 서칭
+            val hint = findExactOOXOOMatch5(colorGrid, bestRows, bestCols)
             if (hint != null) {
-                val fx = boardLeft + (hint.fromC * blockSize) + (blockSize / 2).toFloat()
-                val fy = boardTop + (hint.fromR * blockSize) + (blockSize / 2).toFloat()
-                val tx = boardLeft + (hint.toC * blockSize) + (blockSize / 2).toFloat()
-                val ty = boardTop + (hint.toR * blockSize) + (blockSize / 2).toFloat()
-                overlayView?.post { overlayView?.setHint(fx, fy, tx, ty, blockSize.toFloat()) }
+                val fx = boardLeft + (hint.fromC * bestBlockSize) + (bestBlockSize / 2).toFloat()
+                val fy = boardTop + (hint.fromR * bestBlockSize) + (bestBlockSize / 2).toFloat()
+                val tx = boardLeft + (hint.toC * bestBlockSize) + (bestBlockSize / 2).toFloat()
+                val ty = boardTop + (hint.toR * bestBlockSize) + (bestBlockSize / 2).toFloat()
+                overlayView?.post { overlayView?.setHint(fx, fy, tx, ty, bestBlockSize.toFloat()) }
             } else {
                 overlayView?.post { overlayView?.clearHint() }
             }
         } catch (e: Throwable) {
-            Log.e(TAG, "analyzeScreenFast 실패", e)
-        } finally {
-            try { image.close() } catch (e: Exception) {} // 예외가 발생하더라도 큐 파이프라인이 막히지 않도록 철저히 close
+            Log.e(TAG, "시스템 실시간 분석 실패", e)
+        } funally {
+            try { image.close() } catch (e: Exception) {}
         }
     }
 
-    private fun identifyColorSpec(pixel: Int): Int {
+    // HSV 정밀 색상 범위 매핑 (로얄매치 매칭 5색 스펙)
+    private fun identifyColorHSV(pixel: Int): Int {
         val r = Color.red(pixel)
         val g = Color.green(pixel)
         val b = Color.blue(pixel)
-        if (r + g + b < 100) return 0 
+        if (r + g + b < 90 || r + g + b > 720) return 0
+
+        val hsv = FloatArray(3)
+        Color.RGBToHSV(r, g, b, hsv)
+        val hue = hsv[0]
+        val sat = hsv[1]
+        val value = hsv[2]
+
+        if (sat < 0.15f || value < 0.15f) return 0
+
         return when {
-            r > 150 && g > 140 && b < 130 -> 3 // 노랑
-            r > 140 && g < 90 && b < 90   -> 1 // 빨강
-            b > 140 && r < 100 && g < 130 -> 2 // 파랑
-            g > 130 && r < 100 && b < 100 -> 4 // 초록
-            r > 130 && b > 140 && g < 100 -> 5 // 보라
+            (hue >= 345f || hue <= 15f) -> 1  // 빨강 (하트)
+            (hue in 195f..245f) -> 2          // 파랑 (방패)
+            (hue in 40f..65f) -> 3            // 노랑 (왕관)
+            (hue in 90f..145f) -> 4           // 초록 (수박/잎)
+            (hue in 265f..330f) -> 5          // 보라 (새/깃털)
             else -> 0
         }
     }
 
-    data class MatchHint(val fromR: Int, val fromC: Int, val toR: Int, val toC: Int)
-
-    // 💡 오직 5개 연속 배치 무브만 골라 검출하는 필터 로직
-    private fun findFiveMatchPattern(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
-        val directions = arrayOf(Pair(0, 1), Pair(1, 0))
+    /**
+     * ⚡ [요청하신 알고리즘 공식]
+     * 오직 'O O X O O' 가로 혹은 세로 형태의 특수 매칭 기회만 찾아서 반환합니다.
+     */
+    private fun findExactOOXOOMatch5(grid: Array<IntArray>, rows: Int, cols: Int): MatchHint? {
+        
+        // 1. 가로 방향 [ O O X O O ] 찾아내기
         for (r in 0 until rows) {
-            for (c in 0 until cols) {
-                if (grid[r][c] == 0) continue
-                for (dir in directions) {
-                    val nr = r + dir.first
-                    val nc = c + dir.second
-                    if (nr < rows && nc < cols && grid[nr][nc] != 0 && grid[r][c] != grid[nr][nc]) {
-                        val temp = grid[r][c]
-                        grid[r][c] = grid[nr][nc]
-                        grid[nr][nc] = temp
-                        
-                        // 단 1번 스왑하여 5라인 정렬이 성공하는가?
-                        if (checkGridMatch5(grid, rows, cols)) {
-                            return MatchHint(r, c, nr, nc)
-                        }
-                        
-                        grid[nr][nc] = grid[r][c]
-                        grid[r][c] = temp
+            for (c in 0..cols - 5) {
+                val t = grid[r][c] // 기준 컬러 마스크
+                if (t == 0) continue
+
+                // 0, 1, 3, 4번째 칸이 전부 같고, 정중앙 2번째(X) 자리만 색이 다를 때
+                if (grid[r][c+1] == t && grid[r][c+3] == t && grid[r][c+4] == t && grid[r][c+2] != t) {
+                    val targetRow = r
+                    val targetCol = c + 2 // 우리가 무조건 채워넣어야 하는 정가운데 조각 위치
+
+                    // 가로가 고정 완성 세트이므로 수직축(위/아래)에서만 같은 색 조각을 끌어올 수 있음!
+                    // 위에서 정가운데로 당겨 내리기
+                    if (targetRow - 1 >= 0 && grid[targetRow - 1][targetCol] == t) {
+                        return MatchHint(fromR = targetRow - 1, fromC = targetCol, toR = targetRow, toC = targetCol)
+                    }
+                    // 아래에서 정가운데로 당겨 올리기
+                    if (targetRow + 1 < rows && grid[targetRow + 1][targetCol] == t) {
+                        return MatchHint(fromR = targetRow + 1, fromC = targetCol, toR = targetRow, toC = targetCol)
                     }
                 }
             }
         }
-        return null
-    }
 
-    private fun checkGridMatch5(grid: Array<IntArray>, rows: Int, cols: Int): Boolean {
-        // 가로축 5연속 정밀 스캔
-        for (r in 0 until rows) {
-            for (c in 0..cols - 5) {
-                val color = grid[r][c]
-                if (color != 0 && color == grid[r][c+1] && color == grid[r][c+2] && color == grid[r][c+3] && color == grid[r][c+4]) return true
-            }
-        }
-        // 세로축 5연속 정밀 스캔
+        // 2. 세로 방향 [ O O X O O ] 찾아내기
         for (c in 0 until cols) {
             for (r in 0..rows - 5) {
-                val color = grid[r+1][c]
-                if (color != 0 && color == grid[r][c] && color == grid[r+2][c] && color == grid[r+3][c] && color == grid[r+4][c]) return true
+                val t = grid[r][c]
+                if (t == 0) continue
+
+                // 세로축으로 0, 1, 3, 4번째가 일치하고 가운데 2번째(X)만 다를 때
+                if (grid[r+1][c] == t && grid[r+3][c] == t && grid[r+4][c] == t && grid[r+2][c] != t) {
+                    val targetRow = r + 2 // 채워넣어야 하는 정가운데 조각 위치
+                    val targetCol = c
+
+                    // 세로가 고정 완성 세트이므로 수평축(좌/우)에서만 같은 색 조각을 밀어 넣을 수 있음!
+                    // 왼쪽에서 정가운데로 밀어 넣기
+                    if (targetCol - 1 >= 0 && grid[targetRow][targetCol - 1] == t) {
+                        return MatchHint(fromR = targetRow, fromC = targetCol - 1, toR = targetRow, toC = targetCol)
+                    }
+                    // 오른쪽에서 정가운데로 밀어 넣기
+                    if (targetCol + 1 < cols && grid[targetRow][targetCol + 1] == t) {
+                        return MatchHint(fromR = targetRow, fromC = targetCol + 1, toR = targetRow, toC = targetCol)
+                    }
+                }
             }
         }
-        return false
+        return null // 찬스 없음
     }
 
     override fun onDestroy() {
@@ -396,7 +457,9 @@ class OverlayService : Service() {
             if (overlayView != null) { windowManager?.removeView(overlayView); overlayView = null }
             if (controlView != null) { windowManager?.removeView(controlView); controlView = null }
         } catch (e: Exception) {
-            Log.e(TAG, "onDestroy 실패", e)
+            Log.e(TAG, "자원 정리 실패", e)
         }
     }
+
+    data class MatchHint(val fromR: Int, val fromC: Int, val toR: Int, val toC: Int)
 }
