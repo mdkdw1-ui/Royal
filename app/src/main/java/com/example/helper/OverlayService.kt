@@ -54,23 +54,8 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        try {
-            createNotificationChannel()
-            val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
-                .setContentTitle("로얄매치 AI 마스터")
-                .setContentText("가변 격자 시스템 동작 중")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
-                .build()
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-            } else {
-                startForeground(1, notification)
-            }
-        } catch (e: Exception) {
-            stopSelf()
-        }
+        // 포그라운드 채널 사전 정의
+        createNotificationChannel()
     }
 
     private fun createNotificationChannel() {
@@ -81,7 +66,6 @@ class OverlayService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // 중복 생성 방지 코드
         if (mediaProjection != null) return START_NOT_STICKY
 
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_OK) ?: Activity.RESULT_OK
@@ -98,6 +82,20 @@ class OverlayService : Service() {
         }
 
         try {
+            // 🎯 [Android 14 타이밍 이슈 해결] getMediaProjection 호출 직전에 알림 및 미디어 타입 완벽 선언
+            val notification: Notification = NotificationCompat.Builder(this, "helper_channel")
+                .setContentTitle("로얄매치 AI 마스터")
+                .setContentText("가변 격자 시스템 동작 중")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .build()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+            } else {
+                startForeground(1, notification)
+            }
+
             windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val metrics = DisplayMetrics()
             windowManager?.defaultDisplay?.getRealMetrics(metrics)
@@ -105,6 +103,8 @@ class OverlayService : Service() {
             screenHeight = metrics.heightPixels
 
             val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            
+            // 시스템으로부터 캡처 토큰 승인 취득
             mediaProjection = mpManager.getMediaProjection(resultCode, dataIntent)
             
             backgroundThread = HandlerThread("Grid_Scanner").apply { start() }
@@ -112,29 +112,21 @@ class OverlayService : Service() {
 
             imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
             
-            // 🎯 [화면공유 성공 버전 로직] 안정성이 검증된 표준 플래그(VIRTUAL_DISPLAY_FLAG_PUBLIC) 사용
+            // 🎯 [핵심 수정] PUBLIC 플래그 대신 보안 정책에 걸리지 않는 표준 미러 플래그(AUTO_MIRROR) 적용
             virtualDisplay = mediaProjection?.createVirtualDisplay(
                 "ScreenCapture", screenWidth, screenHeight, metrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC, imageReader!!.surface, null, backgroundHandler
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader!!.surface, null, backgroundHandler
             )
             
             backgroundHandler?.post(analyzeRunnable)
 
-            // 메인 액티비티 백그라운드 전환 처리
-            val finishIntent = Intent(this, MainActivity::class.java).apply {
-                action = Intent.ACTION_MAIN
-                addCategory(Intent.CATEGORY_LAUNCHER)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                putExtra("ACTION_FINISH", true)
-            }
-            startActivity(finishIntent)
-
         } catch (e: Exception) {
-            Log.e(TAG, "MediaProjection 초기화 실패", e)
-            stopSelf()
+            Log.e(TAG, "MediaProjection 캡처 엔진 초기화 실패", e)
+            stopSelf() // 에러 발생 시 안전하게 자체 종료
             return START_NOT_STICKY
         }
 
+        // 오버레이 및 컨트롤러 뷰 띄우기
         if (overlayView == null) {
             overlayView = PatternDrawView(this)
             val params = WindowManager.LayoutParams(
@@ -247,18 +239,17 @@ class OverlayService : Service() {
             pixelBuffer!!.rewind()
             bitmap.copyPixelsFromBuffer(pixelBuffer!!)
 
-            // 🎯 [기능 업그레이드]: 고정 구역을 없애고 화면 전체 영역을 유동적으로 서칭하도록 범위 확장
+            // 가변 전역 서칭 서칭 범위
             val scanLeft = (screenWidth * 0.02f).toInt()
             val scanRight = (screenWidth * 0.98f).toInt()
-            val scanTop = (screenHeight * 0.22f).toInt()     // 상단 기믹 구역 완전 포함
-            val scanBottom = (screenHeight * 0.90f).toInt()  // 하단 보드판 영역 끝까지 포함
+            val scanTop = (screenHeight * 0.22f).toInt()     
+            val scanBottom = (screenHeight * 0.90f).toInt()  
 
             var minBlockX = screenWidth
             var maxBlockX = 0
             var minBlockY = screenHeight
             var maxBlockY = 0
 
-            // 실시간 블록 탐색을 통해 유효 보드판의 동적 외곽선 감지
             for (y in scanTop until scanBottom step 18) {
                 for (x in scanLeft until scanRight step 18) {
                     if (identifyColorHSV(bitmap.getPixel(x, y)) in 1..5) {
@@ -273,13 +264,11 @@ class OverlayService : Service() {
             val boardWidth = maxBlockX - minBlockX
             val boardHeight = maxBlockY - minBlockY
 
-            // 정상적인 게임 화면이 아니라고 판단되면 힌트 클리어
             if (boardWidth < screenWidth * 0.5 || boardHeight < 200) {
                 overlayView?.post { overlayView?.clearHint() }
                 return
             }
 
-            // 블록 해상도 비율 자동 계산 (로얄매치 규격 기준)
             val approxBlockSize = screenWidth / 9.2f
             val currentGridCols = Math.round(boardWidth.toFloat() / approxBlockSize).coerceIn(4, 11)
             val currentGridRows = Math.round(boardHeight.toFloat() / approxBlockSize).coerceIn(2, 14)
@@ -290,7 +279,6 @@ class OverlayService : Service() {
             val topLeftAnchorX = minBlockX + (blockSizeX / 2f)
             val topLeftAnchorY = minBlockY + (blockSizeY / 2f)
 
-            // 기믹 자리(빈공간)는 자동으로 0 매핑되는 가변 구조체 채우기
             val colorGrid = Array(currentGridRows) { IntArray(currentGridCols) }
             for (r in 0 until currentGridRows) {
                 for (c in 0 until currentGridCols) {
@@ -300,7 +288,6 @@ class OverlayService : Service() {
                 }
             }
 
-            // 미러볼 생성을 목표로 하는 5-Match 특화 시뮬레이터 구동
             val hint = findFiveMatchBySimulation(colorGrid, currentGridRows, currentGridCols)
             if (hint != null) {
                 val fx = topLeftAnchorX + (hint.fromC * blockSizeX)
@@ -313,7 +300,7 @@ class OverlayService : Service() {
                 overlayView?.post { overlayView?.clearHint() }
             }
         } catch (e: Throwable) {
-            Log.e(TAG, "스캔 엔진 주기 에러", e)
+            Log.e(TAG, "스캔 엔진 내부 오류", e)
         } finally {
             try { image.close() } catch (e: Exception) {}
         }
@@ -383,7 +370,6 @@ class OverlayService : Service() {
 
         fun cloneGrid() = Array(rows) { r -> grid[r].clone() }
 
-        // 가로 스왑 시뮬레이션
         for (r in 0 until rows) {
             for (c in 0 until cols - 1) {
                 if (grid[r][c] == 0 && grid[r][c+1] == 0) continue
@@ -398,7 +384,6 @@ class OverlayService : Service() {
             }
         }
 
-        // 세로 스왑 시뮬레이션
         for (r in 0 until rows - 1) {
             for (c in 0 until cols) {
                 if (grid[r][c] == 0 && grid[r+1][c] == 0) continue
@@ -429,7 +414,7 @@ class OverlayService : Service() {
             if (overlayView != null) { windowManager?.removeView(overlayView); overlayView = null }
             if (controlView != null) { windowManager?.removeView(controlView); controlView = null }
         } catch (e: Exception) {
-            Log.e(TAG, "리소스 해제 실패", e)
+            Log.e(TAG, "리소스 정리 오류", e)
         }
     }
 
