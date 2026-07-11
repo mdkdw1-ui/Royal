@@ -358,7 +358,9 @@ class OverlayService : Service() {
             }
         } catch (e: Throwable) {
             Log.e(TAG, "시스템 실시간 분석 실패", e)
-        } funally {
+        } finally
+
+ {
             try { image.close() } catch (e: Exception) {}
         }
     }
